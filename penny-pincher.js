@@ -2,6 +2,7 @@
 //
 // Routes through free provider/models first in your configured order, then paid.
 // /freemium-configure: model-level selection and ordering with scrollable TUI.
+// Config is persisted with rolling backups (last 10 saves).
 //
 // Commands:
 //   /freemium-configure  — Interactive TUI to select/reorder free & paid models
@@ -12,8 +13,16 @@
 //   /freemium            — Show usage help
 
 const { execSync } = require("child_process");
+const fs = require("fs");
+const path = require("path");
 
-// ── Legacy provider model hints (used for provider-ID-only fallbacks) ──
+// ── Config file paths ──────────────────────────────────────────
+const CONFIG_DIR = path.join(__dirname);
+const CONFIG_FILE = path.join(CONFIG_DIR, "penny-pincher-config.json");
+const BACKUPS_FILE = path.join(CONFIG_DIR, "penny-pincher-config.backups.json");
+const MAX_BACKUPS = 10;
+
+// ── Legacy provider model hints ────────────────────────────────
 const DEFAULT_PROVIDERS = [
   { id: "google",       name: "Google Gemini",        low: "gemini-2.5-flash",              high: "gemini-2.5-flash" },
   { id: "amd-tokenlab", name: "AMD TokenLab",          low: "DeepSeek-V4-Flash",             high: "DeepSeek-V4-Flash" },
@@ -24,14 +33,61 @@ const DEFAULT_PROVIDERS = [
   { id: "requesty",     name: "Requesty",              low: "nvidia/nemotron-3-nano-30b-a3b", high: "google/gemma-4-31b-it" },
 ];
 
-// ── Runtime config ──────────────────────────────────────────────
+// ── Runtime config with persistence ────────────────────────────
 const config = {
   gatewayIp: "192.168.43.100",
   free: DEFAULT_PROVIDERS.map(p => `${p.id}/${p.low}`),
   paid: [],
 };
 
-// Backward-compat: migrate legacy provider-only strings to provider/model
+function saveConfig() {
+  try {
+    const data = {
+      gatewayIp: config.gatewayIp,
+      free: config.free,
+      paid: config.paid,
+      savedAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(data, null, 2), "utf8");
+
+    // Rolling backups: read existing backups, prepend current, trim to MAX_BACKUPS
+    let backups = [];
+    try {
+      const raw = fs.readFileSync(BACKUPS_FILE, "utf8");
+      backups = JSON.parse(raw);
+      if (!Array.isArray(backups)) backups = [];
+    } catch (_) {
+      backups = [];
+    }
+    backups.unshift({
+      gatewayIp: data.gatewayIp,
+      free: data.free,
+      paid: data.paid,
+      savedAt: data.savedAt,
+    });
+    if (backups.length > MAX_BACKUPS) backups.length = MAX_BACKUPS;
+    fs.writeFileSync(BACKUPS_FILE, JSON.stringify(backups, null, 2), "utf8");
+  } catch (_) {
+    // Silently ignore write errors
+  }
+}
+
+function loadConfig() {
+  try {
+    const raw = fs.readFileSync(CONFIG_FILE, "utf8");
+    const data = JSON.parse(raw);
+    if (data.gatewayIp !== undefined) config.gatewayIp = data.gatewayIp;
+    if (Array.isArray(data.free)) config.free = data.free;
+    if (Array.isArray(data.paid)) config.paid = data.paid;
+  } catch (_) {
+    // No saved config yet, use defaults
+  }
+}
+
+// Load config on module init
+loadConfig();
+
+// ── Backward-compat: migrate legacy provider-only strings ──────
 function migrateConfig(registry) {
   const all = [...config.free, ...config.paid];
   if (all.length > 0 && !all[0].includes("/")) {
@@ -59,6 +115,7 @@ function migrateConfig(registry) {
       } catch (_) {}
       return `${pid}/default`;
     });
+    saveConfig();
   }
 }
 
@@ -107,14 +164,12 @@ function resolveEntry(registry, entry) {
 function getFailedEntryIndex(failedModel) {
   if (!failedModel) return -1;
   const { provider, id } = failedModel;
-  // Build the key as stored in config: "provider/model"
   const key = provider && id ? `${provider}/${id}` : null;
   const all = [...config.free, ...config.paid];
   if (key) {
     const idx = all.indexOf(key);
     if (idx >= 0) return idx;
   }
-  // Fallback: match by provider prefix
   const prov = provider || (typeof failedModel === "string" ? failedModel.split("/")[0] : null);
   if (prov) {
     const idx = all.findIndex(e => e === prov || e.startsWith(prov + "/"));
@@ -123,22 +178,6 @@ function getFailedEntryIndex(failedModel) {
   return -1;
 }
 
-function entryProvider(entry) {
-  return entry.includes("/") ? entry.split("/")[0] : entry;
-}
-
-function entryLabel(entry, registry) {
-  if (!entry) return "unknown";
-  if (entry.includes("/")) {
-    const [prov, ...rest] = entry.split("/");
-    const modelId = rest.join("/");
-    const m = registry?.find?.(prov, modelId);
-    if (m?.name) return `${prov}/${m.name}`;
-  }
-  return entry;
-}
-
-// ── Usage text for /freemium help command ──────────────────────
 function showUsage(ctx) {
   ctx.ui.notify(
     `Penny-Pincher commands:\n` +
@@ -161,6 +200,7 @@ export default function (pi) {
         return;
       }
       config.gatewayIp = ip;
+      saveConfig();
       const status = pingGateway(ip);
       ctx.ui.notify(`Gateway ${ip}: ${status}`, status === "online" ? "info" : "warning");
     },
@@ -183,6 +223,7 @@ export default function (pi) {
       );
       if (ok) {
         config.free = suggested;
+        saveConfig();
         ctx.ui.notify(`Applied: ${proposed}`, "info");
       }
     },
@@ -223,7 +264,6 @@ export default function (pi) {
         let cachedLines = undefined;
 
         const VIEWPORT = 18;
-        const pool = () => new Set([...free, ...paid]);
 
         function getItems() {
           const result = [];
@@ -413,6 +453,7 @@ export default function (pi) {
           if (data === "\r" || data === "\n") {
             config.free = free;
             config.paid = paid;
+            saveConfig();
             done(null);
             return;
           }
