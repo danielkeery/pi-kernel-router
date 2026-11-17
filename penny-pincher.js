@@ -8,7 +8,6 @@
 //   /freemium-configure  — Multi-screen configuration TUI
 //   /freemium-list      — Show current free and paid model chains
 //   /freemium-reset     — Reset to factory defaults
-//   /set-router-gateway  — Set gateway IP for network-liveness checks
 
 const { execSync } = require("child_process");
 const fs = require("fs");
@@ -184,6 +183,9 @@ export default function (pi) {
         return;
       }
 
+      const theme = ctx.theme;
+      const keybindings = ctx.keybindings;
+
       let allModels = [];
       try {
         allModels = (ctx.modelRegistry.getAll?.() ?? [])
@@ -205,8 +207,6 @@ export default function (pi) {
       let addScrollTop = 0;
       let mainScrollTop = 0;
       let undoStack = [];
-      let cachedWidth = undefined;
-      let cachedLines = undefined;
       let editingAddress = false;
       let errorCursor = 0;
       let metrics = { ...config.metrics };
@@ -367,13 +367,12 @@ export default function (pi) {
         lines.push("");
         const onoff = errorHandling.networkTestOnFail ? theme.fg("success", "ON") : theme.fg("warning", "OFF");
         const addr = editingAddress ? `${errorHandling.testAddress}█` : errorHandling.testAddress;
-        const sel = cursor % 2;
         const lines2 = [
           `  Network test on failure: ${onoff}`,
           `  Address to test:         ${addr}`,
         ];
         for (let i = 0; i < lines2.length; i++) {
-          lines.push(`${i === cursor ? theme.fg("accent", ">") : " "} ${lines2[i]}`);
+          lines.push(`${i === errorCursor ? theme.fg("accent", ">") : " "} ${lines2[i]}`);
         }
         if (editingAddress) { lines.push(""); lines.push(theme.fg("dim", "  Type address, Enter to confirm")); }
         lines.push("");
@@ -410,200 +409,204 @@ export default function (pi) {
       }
 
       function render(width) {
-        if (cachedLines && cachedWidth === width) return cachedLines;
-        cachedWidth = width;
-        if (screen === "menu") cachedLines = renderMenu().map(l => truncate(l, width));
-        else if (screen === "select") cachedLines = renderSelect().map(l => truncate(l, width));
-        else if (screen === "priority") cachedLines = renderPriority().map(l => truncate(l, width));
-        else if (screen === "error") cachedLines = renderErrorConfig().map(l => truncate(l, width));
-        else if (screen === "about") cachedLines = renderAbout().map(l => truncate(l, width));
-        else cachedLines = renderMenu().map(l => truncate(l, width));
-        return cachedLines;
+        let lines;
+        if (screen === "menu") lines = renderMenu();
+        else if (screen === "select") lines = renderSelect();
+        else if (screen === "priority") lines = renderPriority();
+        else if (screen === "error") lines = renderErrorConfig();
+        else if (screen === "about") lines = renderAbout();
+        else lines = renderMenu();
+        return lines.map(l => truncate(l, width));
       }
 
-      function invalidate() { cachedWidth = undefined; cachedLines = undefined; }
-
-      function handleInput(data) {
-        // ── Menu ──
-        if (screen === "menu") {
-          const isUp = keybindings.matches(data, "tui.select.up");
-          const isDown = keybindings.matches(data, "tui.select.down");
-          if (isUp && cursor > 0) { cursor--; invalidate(); tui.requestRender(); return; }
-          if (isDown && cursor < MENU_ITEMS.length - 1) { cursor++; invalidate(); tui.requestRender(); return; }
-          if (data === "\r" || data === "\n") {
-            const id = MENU_ITEMS[cursor].id;
-            if (id === "select") { screen = "select"; addCursor = 0; addScrollTop = 0; }
-            else if (id === "priority") { screen = "priority"; cursor = 0; mainScrollTop = 0; }
-            else if (id === "optimize") { free = suggestOrder(free); }
-            else if (id === "error") { screen = "error"; cursor = 0; }
-            else if (id === "about") { screen = "about"; }
-            invalidate(); tui.requestRender(); return;
-          }
-          if (data === "q" || data === "Q") { done(null); return; }
-          invalidate(); tui.requestRender(); return;
-        }
-
-        // ── Select screen ──
-        if (screen === "select") {
-          clamp();
-          const isUp = keybindings.matches(data, "tui.select.up");
-          const isDown = keybindings.matches(data, "tui.select.down");
-          if (isUp && addCursor > 0) { addCursor--; invalidate(); tui.requestRender(); return; }
-          if (isDown && addCursor < allModels.length - 1) { addCursor++; invalidate(); tui.requestRender(); return; }
-
-          if (data === " " && allModels.length > 0) {
-            const m = allModels[addCursor];
-            if (m) {
-              const key = `${m.provider}/${m.id}`;
-              const fi = free.indexOf(key);
-              const pi = paid.indexOf(key);
-              if (fi >= 0) free.splice(fi, 1);
-              else if (pi >= 0) paid.splice(pi, 1);
-              else free.push(key);
-            }
-            invalidate(); tui.requestRender(); return;
-          }
-
-          if (data === "f" || data === "F") {
-            const m = allModels[addCursor];
-            if (m) {
-              const key = `${m.provider}/${m.id}`;
-              const fi = free.indexOf(key);
-              const pi = paid.indexOf(key);
-              if (pi >= 0) { paid.splice(pi, 1); free.push(key); }
-            }
-            invalidate(); tui.requestRender(); return;
-          }
-          if (data === "p" || data === "P") {
-            const m = allModels[addCursor];
-            if (m) {
-              const key = `${m.provider}/${m.id}`;
-              const fi = free.indexOf(key);
-              if (fi >= 0) { free.splice(fi, 1); paid.push(key); }
-            }
-            invalidate(); tui.requestRender(); return;
-          }
-
-          if (keybindings.matches(data, "tui.select.cancel")) { screen = "menu"; invalidate(); tui.requestRender(); return; }
-          if (data === "\r" || data === "\n") { screen = "menu"; invalidate(); tui.requestRender(); return; }
-          if (data.length === 1 && /^[a-zA-Z]$/.test(data)) { jumpByLetter(data); invalidate(); tui.requestRender(); return; }
-          invalidate(); tui.requestRender(); return;
-        }
-
-        // ── Priority screen ──
-        if (screen === "priority") {
-          const items = getItems();
-          clamp();
-          if (data === "\r" || data === "\n") {
-            config.free = free; config.paid = paid; saveConfig(); done(null); return;
-          }
-          if (keybindings.matches(data, "tui.select.cancel")) { screen = "menu"; moveMode = false; invalidate(); tui.requestRender(); return; }
-          if (data === " " && items.length > 0) { moveMode = !moveMode; invalidate(); tui.requestRender(); return; }
-          const isUp = keybindings.matches(data, "tui.select.up");
-          const isDown = keybindings.matches(data, "tui.select.down");
-          if (isUp && cursor > 0) {
-            if (moveMode) {
-              const cur = items[cursor]; const tgt = items[cursor - 1];
-              if (cur.section === tgt.section) {
-                const arr = cur.section === "free" ? free : paid;
-                const ci = arr.indexOf(cur.entry); const ti = arr.indexOf(tgt.entry);
-                if (ci >= 0 && ti >= 0) { [arr[ci], arr[ti]] = [arr[ti], arr[ci]]; cursor--; }
-              }
-            } else { cursor--; }
-            invalidate(); tui.requestRender(); return;
-          }
-          if (isDown && cursor < items.length - 1) {
-            if (moveMode) {
-              const cur = items[cursor]; const tgt = items[cursor + 1];
-              if (cur.section === tgt.section) {
-                const arr = cur.section === "free" ? free : paid;
-                const ci = arr.indexOf(cur.entry); const ti = arr.indexOf(tgt.entry);
-                if (ci >= 0 && ti >= 0) { [arr[ci], arr[ti]] = [arr[ti], arr[ci]]; cursor++; }
-              }
-            } else { cursor++; }
-            invalidate(); tui.requestRender(); return;
-          }
-          if (data === "d" || data === "D") {
-            if (cursor < items.length) {
-              undoStack.push({ action: "delete", entry: items[cursor].entry, section: items[cursor].section });
-              const entry = items[cursor].entry;
-              const fi = free.indexOf(entry);
-              if (fi >= 0) free.splice(fi, 1);
-              const pi = paid.indexOf(entry);
-              if (pi >= 0) paid.splice(pi, 1);
-              moveMode = false;
-              if (cursor >= items.length - 1 && cursor > 0) cursor--;
-            }
-            invalidate(); tui.requestRender(); return;
-          }
-          if (data === "\x1a") {
-            const last = undoStack.pop();
-            if (last) {
-              if (last.action === "delete") {
-                if (last.section === "free") free.push(last.entry); else paid.push(last.entry);
-              }
-            }
-            invalidate(); tui.requestRender(); return;
-          }
-          if (data === "f" || data === "F") {
-            if (cursor < items.length) {
-              const entry = items[cursor].entry;
-              const pi = paid.indexOf(entry);
-              if (pi >= 0) { paid.splice(pi, 1); free.push(entry); }
-            }
-            moveMode = false; invalidate(); tui.requestRender(); return;
-          }
-          if (data === "p" || data === "P") {
-            if (cursor < items.length) {
-              const entry = items[cursor].entry;
-              const fi = free.indexOf(entry);
-              if (fi >= 0) { free.splice(fi, 1); paid.push(entry); }
-            }
-            moveMode = false; invalidate(); tui.requestRender(); return;
-          }
-          if (data.length === 1 && /^[a-zA-Z]$/.test(data)) { jumpByLetter(data); invalidate(); tui.requestRender(); return; }
-          invalidate(); tui.requestRender(); return;
-        }
-
-        // ── Error Handling screen ──
-        if (screen === "error") {
-          if (editingAddress) {
+      return ctx.ui.custom({
+        title: "Penny Pincher",
+        render,
+        handleInput(data, { done }) {
+          // ── Menu ──
+          if (screen === "menu") {
+            const isUp = keybindings.matches(data, "tui.select.up");
+            const isDown = keybindings.matches(data, "tui.select.down");
+            if (isUp && cursor > 0) { cursor--; return; }
+            if (isDown && cursor < MENU_ITEMS.length - 1) { cursor++; return; }
             if (data === "\r" || data === "\n") {
-              editingAddress = false;
-              errorHandling.testAddress = errorHandling.testAddress.trim() || errorHandling.testAddress;
-              invalidate(); tui.requestRender(); return;
+              const id = MENU_ITEMS[cursor].id;
+              if (id === "select") { screen = "select"; addCursor = 0; addScrollTop = 0; }
+              else if (id === "priority") { screen = "priority"; cursor = 0; mainScrollTop = 0; }
+              else if (id === "optimize") { free = suggestOrder(free); ctx.ui.notify("Optimized free chain ✓", "info"); }
+              else if (id === "error") { screen = "error"; errorCursor = 0; }
+              else if (id === "about") { screen = "about"; }
+              return;
             }
-            if (keybindings.matches(data, "tui.select.cancel") || data === "\x1b") {
-              editingAddress = false;
-              invalidate(); tui.requestRender(); return;
+            if (data === "q" || data === "Q") { done(); return; }
+            return;
+          }
+
+          // ── Select screen ──
+          if (screen === "select") {
+            clamp();
+            const isUp = keybindings.matches(data, "tui.select.up");
+            const isDown = keybindings.matches(data, "tui.select.down");
+            if (isUp && addCursor > 0) { addCursor--; return; }
+            if (isDown && addCursor < allModels.length - 1) { addCursor++; return; }
+
+            if (data === " " && allModels.length > 0) {
+              const m = allModels[addCursor];
+              if (m) {
+                const key = `${m.provider}/${m.id}`;
+                const fi = free.indexOf(key);
+                const pi = paid.indexOf(key);
+                if (fi >= 0) free.splice(fi, 1);
+                else if (pi >= 0) paid.splice(pi, 1);
+                else free.push(key);
+              }
+              return;
             }
-            if (data === "\x7f" || data === "\b") { errorHandling.testAddress = errorHandling.testAddress.slice(0, -1); invalidate(); tui.requestRender(); return; }
-            if (data.length === 1 && data >= "0" && data <= "9" || data === ".") { errorHandling.testAddress += data; invalidate(); tui.requestRender(); return; }
-            invalidate(); tui.requestRender(); return;
+
+            if (data === "f" || data === "F") {
+              const m = allModels[addCursor];
+              if (m) {
+                const key = `${m.provider}/${m.id}`;
+                const fi = free.indexOf(key);
+                const pi = paid.indexOf(key);
+                if (pi >= 0) { paid.splice(pi, 1); free.push(key); }
+                else if (fi < 0) free.push(key);
+              }
+              return;
+            }
+            if (data === "p" || data === "P") {
+              const m = allModels[addCursor];
+              if (m) {
+                const key = `${m.provider}/${m.id}`;
+                const fi = free.indexOf(key);
+                if (fi >= 0) { free.splice(fi, 1); paid.push(key); }
+                else if (paid.indexOf(key) < 0) paid.push(key);
+              }
+              return;
+            }
+
+            if (keybindings.matches(data, "tui.select.cancel")) { screen = "menu"; return; }
+            if (data === "\r" || data === "\n") { screen = "menu"; return; }
+            if (data.length === 1 && /^[a-zA-Z]$/.test(data)) { jumpByLetter(data); return; }
+            return;
           }
-          const isUp = keybindings.matches(data, "tui.select.up");
-          const isDown = keybindings.matches(data, "tui.select.down");
-          if (isUp && cursor > 0) { cursor--; invalidate(); tui.requestRender(); return; }
-          if (isDown && cursor < 1) { cursor++; invalidate(); tui.requestRender(); return; }
-          if (data === " ") { errorHandling.networkTestOnFail = !errorHandling.networkTestOnFail; invalidate(); tui.requestRender(); return; }
-          if (data === "\r" || data === "\n") {
-            if (cursor === 1) { editingAddress = true; invalidate(); tui.requestRender(); return; }
-            invalidate(); tui.requestRender(); return;
+
+          // ── Priority screen ──
+          if (screen === "priority") {
+            const items = getItems();
+            clamp();
+            if (data === "\r" || data === "\n") {
+              config.free = free; config.paid = paid;
+              config.errorHandling = errorHandling;
+              saveConfig();
+              ctx.ui.notify("Configuration saved ✓", "info");
+              done(); return;
+            }
+            if (keybindings.matches(data, "tui.select.cancel")) { screen = "menu"; moveMode = false; return; }
+            if (data === " " && items.length > 0) { moveMode = !moveMode; return; }
+            const isUp = keybindings.matches(data, "tui.select.up");
+            const isDown = keybindings.matches(data, "tui.select.down");
+            if (isUp && cursor > 0) {
+              if (moveMode) {
+                const cur = items[cursor]; const tgt = items[cursor - 1];
+                if (cur.section === tgt.section) {
+                  const arr = cur.section === "free" ? free : paid;
+                  const ci = arr.indexOf(cur.entry); const ti = arr.indexOf(tgt.entry);
+                  if (ci >= 0 && ti >= 0) { [arr[ci], arr[ti]] = [arr[ti], arr[ci]]; cursor--; }
+                }
+              } else { cursor--; }
+              return;
+            }
+            if (isDown && cursor < items.length - 1) {
+              if (moveMode) {
+                const cur = items[cursor]; const tgt = items[cursor + 1];
+                if (cur.section === tgt.section) {
+                  const arr = cur.section === "free" ? free : paid;
+                  const ci = arr.indexOf(cur.entry); const ti = arr.indexOf(tgt.entry);
+                  if (ci >= 0 && ti >= 0) { [arr[ci], arr[ti]] = [arr[ti], arr[ci]]; cursor++; }
+                }
+              } else { cursor++; }
+              return;
+            }
+            if (data === "d" || data === "D") {
+              if (cursor < items.length) {
+                undoStack.push({ action: "delete", entry: items[cursor].entry, section: items[cursor].section });
+                const entry = items[cursor].entry;
+                const fi = free.indexOf(entry);
+                if (fi >= 0) free.splice(fi, 1);
+                const pi = paid.indexOf(entry);
+                if (pi >= 0) paid.splice(pi, 1);
+                moveMode = false;
+                if (cursor >= items.length - 1 && cursor > 0) cursor--;
+              }
+              return;
+            }
+            if (data === "\x1a") {
+              const last = undoStack.pop();
+              if (last) {
+                if (last.action === "delete") {
+                  if (last.section === "free") free.push(last.entry); else paid.push(last.entry);
+                }
+              }
+              return;
+            }
+            if (data === "f" || data === "F") {
+              if (cursor < items.length) {
+                const entry = items[cursor].entry;
+                const pi = paid.indexOf(entry);
+                if (pi >= 0) { paid.splice(pi, 1); free.push(entry); }
+              }
+              moveMode = false; return;
+            }
+            if (data === "p" || data === "P") {
+              if (cursor < items.length) {
+                const entry = items[cursor].entry;
+                const fi = free.indexOf(entry);
+                if (fi >= 0) { free.splice(fi, 1); paid.push(entry); }
+              }
+              moveMode = false; return;
+            }
+            if (data.length === 1 && /^[a-zA-Z]$/.test(data)) { jumpByLetter(data); return; }
+            return;
           }
-          if (keybindings.matches(data, "tui.select.cancel")) { screen = "menu"; invalidate(); tui.requestRender(); return; }
-          invalidate(); tui.requestRender(); return;
-        }
 
-        // ── About screen ──
-        if (screen === "about") {
-          if (data === "\x1b" || keybindings.matches(data, "tui.select.cancel") || data === "\r" || data === "\n") { screen = "menu"; invalidate(); tui.requestRender(); return; }
-          invalidate(); tui.requestRender(); return;
-        }
+          // ── Error Handling screen ──
+          if (screen === "error") {
+            if (editingAddress) {
+              if (data === "\r" || data === "\n") {
+                editingAddress = false;
+                errorHandling.testAddress = errorHandling.testAddress.trim() || errorHandling.testAddress;
+                return;
+              }
+              if (keybindings.matches(data, "tui.select.cancel") || data === "\x1b") {
+                editingAddress = false; return;
+              }
+              if (data === "\x7f" || data === "\b") { errorHandling.testAddress = errorHandling.testAddress.slice(0, -1); return; }
+              if (data.length === 1 && (data >= "0" && data <= "9" || data === ".")) { errorHandling.testAddress += data; return; }
+              return;
+            }
+            const isUp = keybindings.matches(data, "tui.select.up");
+            const isDown = keybindings.matches(data, "tui.select.down");
+            if (isUp && errorCursor > 0) { errorCursor--; return; }
+            if (isDown && errorCursor < 1) { errorCursor++; return; }
+            if (data === " ") { errorHandling.networkTestOnFail = !errorHandling.networkTestOnFail; return; }
+            if (data === "\r" || data === "\n") {
+              if (errorCursor === 1) { editingAddress = true; }
+              return;
+            }
+            if (keybindings.matches(data, "tui.select.cancel")) { screen = "menu"; return; }
+            return;
+          }
 
-        invalidate(); tui.requestRender();
-      }
-
-      return { render, invalidate, handleInput };
+          // ── About screen ──
+          if (screen === "about") {
+            if (data === "\x1b" || keybindings.matches(data, "tui.select.cancel") || data === "\r" || data === "\n") {
+              screen = "menu"; return;
+            }
+            return;
+          }
+        },
+      });
     },
   });
 
