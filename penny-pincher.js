@@ -183,9 +183,6 @@ export default function (pi) {
         return;
       }
 
-      const theme = ctx.theme;
-      const keybindings = ctx.keybindings;
-
       let allModels = [];
       try {
         allModels = (ctx.modelRegistry.getAll?.() ?? [])
@@ -209,7 +206,6 @@ export default function (pi) {
       let undoStack = [];
       let editingAddress = false;
       let errorCursor = 0;
-      let metrics = { ...config.metrics };
 
       const MENU_ITEMS = [
         { id: "select", label: "Provider/Model Selection", desc: "Add, remove, and toggle models" },
@@ -256,7 +252,7 @@ export default function (pi) {
         }
       }
 
-      function renderMenu() {
+      function renderMenu(theme) {
         const lines = [];
         lines.push(theme.style("  Freemium Penny-Pincher", { fg: "accent", bold: true }));
         lines.push(theme.fg("dim", `  v${EXT_VERSION} — Configuration Menu`));
@@ -272,7 +268,7 @@ export default function (pi) {
         return lines;
       }
 
-      function renderSelect() {
+      function renderSelect(theme) {
         const lines = [];
         let cursorLine = -1;
         lines.push(theme.style("  Provider/Model Selection", { fg: "accent", bold: true }));
@@ -306,7 +302,7 @@ export default function (pi) {
         return lines.slice(addScrollTop, addScrollTop + VIEWPORT);
       }
 
-      function renderPriority() {
+      function renderPriority(theme) {
         const lines = [];
         let cursorLine = -1;
         const items = getItems();
@@ -361,7 +357,7 @@ export default function (pi) {
         return lines.slice(mainScrollTop, mainScrollTop + VIEWPORT);
       }
 
-      function renderErrorConfig() {
+      function renderErrorConfig(theme) {
         const lines = [];
         lines.push(theme.style("  Error Handling", { fg: "accent", bold: true }));
         lines.push("");
@@ -383,7 +379,7 @@ export default function (pi) {
         return lines;
       }
 
-      function renderAbout() {
+      function renderAbout(theme) {
         const lines = [];
         lines.push(theme.style("  About Penny Pincher", { fg: "accent", bold: true }));
         lines.push("");
@@ -392,7 +388,7 @@ export default function (pi) {
         lines.push(`  Email:      daniel@keery.dev`);
         lines.push(`  GitHub:     https://github.com/danielkeery/pi-kernel-router`);
         lines.push("");
-        const m = metrics;
+        const m = config.metrics;
         const uptime = Date.now() - new Date(m.startDate).getTime();
         const days = Math.floor(uptime / 86400000);
         const hrs = Math.floor((uptime % 86400000) / 3600000);
@@ -408,27 +404,33 @@ export default function (pi) {
         return lines;
       }
 
-      function render(width) {
-        let lines;
-        if (screen === "menu") lines = renderMenu();
-        else if (screen === "select") lines = renderSelect();
-        else if (screen === "priority") lines = renderPriority();
-        else if (screen === "error") lines = renderErrorConfig();
-        else if (screen === "about") lines = renderAbout();
-        else lines = renderMenu();
-        return lines.map(l => truncate(l, width));
-      }
+      await ctx.ui.custom((tui, theme, keybindings, done) => {
+        let cachedWidth = undefined;
+        let cachedLines = undefined;
 
-      return ctx.ui.custom({
-        title: "Penny Pincher",
-        render,
-        handleInput(data, { done }) {
+        const invalidate = () => { cachedWidth = undefined; cachedLines = undefined; };
+
+        function render(width) {
+          if (cachedLines && cachedWidth === width) return cachedLines;
+          cachedWidth = width;
+          let lines;
+          if (screen === "menu") lines = renderMenu(theme);
+          else if (screen === "select") lines = renderSelect(theme);
+          else if (screen === "priority") lines = renderPriority(theme);
+          else if (screen === "error") lines = renderErrorConfig(theme);
+          else if (screen === "about") lines = renderAbout(theme);
+          else lines = renderMenu(theme);
+          cachedLines = lines.map(l => truncate(l, width));
+          return cachedLines;
+        }
+
+        function handleInput(data) {
           // ── Menu ──
           if (screen === "menu") {
             const isUp = keybindings.matches(data, "tui.select.up");
             const isDown = keybindings.matches(data, "tui.select.down");
-            if (isUp && cursor > 0) { cursor--; return; }
-            if (isDown && cursor < MENU_ITEMS.length - 1) { cursor++; return; }
+            if (isUp && cursor > 0) { cursor--; invalidate(); tui.requestRender(); return; }
+            if (isDown && cursor < MENU_ITEMS.length - 1) { cursor++; invalidate(); tui.requestRender(); return; }
             if (data === "\r" || data === "\n") {
               const id = MENU_ITEMS[cursor].id;
               if (id === "select") { screen = "select"; addCursor = 0; addScrollTop = 0; }
@@ -436,10 +438,10 @@ export default function (pi) {
               else if (id === "optimize") { free = suggestOrder(free); ctx.ui.notify("Optimized free chain ✓", "info"); }
               else if (id === "error") { screen = "error"; errorCursor = 0; }
               else if (id === "about") { screen = "about"; }
-              return;
+              invalidate(); tui.requestRender(); return;
             }
             if (data === "q" || data === "Q") { done(); return; }
-            return;
+            invalidate(); tui.requestRender(); return;
           }
 
           // ── Select screen ──
@@ -447,8 +449,8 @@ export default function (pi) {
             clamp();
             const isUp = keybindings.matches(data, "tui.select.up");
             const isDown = keybindings.matches(data, "tui.select.down");
-            if (isUp && addCursor > 0) { addCursor--; return; }
-            if (isDown && addCursor < allModels.length - 1) { addCursor++; return; }
+            if (isUp && addCursor > 0) { addCursor--; invalidate(); tui.requestRender(); return; }
+            if (isDown && addCursor < allModels.length - 1) { addCursor++; invalidate(); tui.requestRender(); return; }
 
             if (data === " " && allModels.length > 0) {
               const m = allModels[addCursor];
@@ -460,7 +462,7 @@ export default function (pi) {
                 else if (pi >= 0) paid.splice(pi, 1);
                 else free.push(key);
               }
-              return;
+              invalidate(); tui.requestRender(); return;
             }
 
             if (data === "f" || data === "F") {
@@ -472,7 +474,7 @@ export default function (pi) {
                 if (pi >= 0) { paid.splice(pi, 1); free.push(key); }
                 else if (fi < 0) free.push(key);
               }
-              return;
+              invalidate(); tui.requestRender(); return;
             }
             if (data === "p" || data === "P") {
               const m = allModels[addCursor];
@@ -482,13 +484,13 @@ export default function (pi) {
                 if (fi >= 0) { free.splice(fi, 1); paid.push(key); }
                 else if (paid.indexOf(key) < 0) paid.push(key);
               }
-              return;
+              invalidate(); tui.requestRender(); return;
             }
 
-            if (keybindings.matches(data, "tui.select.cancel")) { screen = "menu"; return; }
-            if (data === "\r" || data === "\n") { screen = "menu"; return; }
-            if (data.length === 1 && /^[a-zA-Z]$/.test(data)) { jumpByLetter(data); return; }
-            return;
+            if (keybindings.matches(data, "tui.select.cancel")) { screen = "menu"; invalidate(); tui.requestRender(); return; }
+            if (data === "\r" || data === "\n") { screen = "menu"; invalidate(); tui.requestRender(); return; }
+            if (data.length === 1 && /^[a-zA-Z]$/.test(data)) { if (jumpByLetter(data)) { invalidate(); tui.requestRender(); } return; }
+            invalidate(); tui.requestRender(); return;
           }
 
           // ── Priority screen ──
@@ -502,8 +504,8 @@ export default function (pi) {
               ctx.ui.notify("Configuration saved ✓", "info");
               done(); return;
             }
-            if (keybindings.matches(data, "tui.select.cancel")) { screen = "menu"; moveMode = false; return; }
-            if (data === " " && items.length > 0) { moveMode = !moveMode; return; }
+            if (keybindings.matches(data, "tui.select.cancel")) { screen = "menu"; moveMode = false; invalidate(); tui.requestRender(); return; }
+            if (data === " " && items.length > 0) { moveMode = !moveMode; invalidate(); tui.requestRender(); return; }
             const isUp = keybindings.matches(data, "tui.select.up");
             const isDown = keybindings.matches(data, "tui.select.down");
             if (isUp && cursor > 0) {
@@ -515,7 +517,7 @@ export default function (pi) {
                   if (ci >= 0 && ti >= 0) { [arr[ci], arr[ti]] = [arr[ti], arr[ci]]; cursor--; }
                 }
               } else { cursor--; }
-              return;
+              invalidate(); tui.requestRender(); return;
             }
             if (isDown && cursor < items.length - 1) {
               if (moveMode) {
@@ -526,7 +528,7 @@ export default function (pi) {
                   if (ci >= 0 && ti >= 0) { [arr[ci], arr[ti]] = [arr[ti], arr[ci]]; cursor++; }
                 }
               } else { cursor++; }
-              return;
+              invalidate(); tui.requestRender(); return;
             }
             if (data === "d" || data === "D") {
               if (cursor < items.length) {
@@ -539,7 +541,7 @@ export default function (pi) {
                 moveMode = false;
                 if (cursor >= items.length - 1 && cursor > 0) cursor--;
               }
-              return;
+              invalidate(); tui.requestRender(); return;
             }
             if (data === "\x1a") {
               const last = undoStack.pop();
@@ -548,7 +550,7 @@ export default function (pi) {
                   if (last.section === "free") free.push(last.entry); else paid.push(last.entry);
                 }
               }
-              return;
+              invalidate(); tui.requestRender(); return;
             }
             if (data === "f" || data === "F") {
               if (cursor < items.length) {
@@ -556,7 +558,7 @@ export default function (pi) {
                 const pi = paid.indexOf(entry);
                 if (pi >= 0) { paid.splice(pi, 1); free.push(entry); }
               }
-              moveMode = false; return;
+              moveMode = false; invalidate(); tui.requestRender(); return;
             }
             if (data === "p" || data === "P") {
               if (cursor < items.length) {
@@ -564,10 +566,10 @@ export default function (pi) {
                 const fi = free.indexOf(entry);
                 if (fi >= 0) { free.splice(fi, 1); paid.push(entry); }
               }
-              moveMode = false; return;
+              moveMode = false; invalidate(); tui.requestRender(); return;
             }
-            if (data.length === 1 && /^[a-zA-Z]$/.test(data)) { jumpByLetter(data); return; }
-            return;
+            if (data.length === 1 && /^[a-zA-Z]$/.test(data)) { if (jumpByLetter(data)) { invalidate(); tui.requestRender(); } return; }
+            invalidate(); tui.requestRender(); return;
           }
 
           // ── Error Handling screen ──
@@ -576,36 +578,38 @@ export default function (pi) {
               if (data === "\r" || data === "\n") {
                 editingAddress = false;
                 errorHandling.testAddress = errorHandling.testAddress.trim() || errorHandling.testAddress;
-                return;
+                invalidate(); tui.requestRender(); return;
               }
               if (keybindings.matches(data, "tui.select.cancel") || data === "\x1b") {
-                editingAddress = false; return;
+                editingAddress = false; invalidate(); tui.requestRender(); return;
               }
-              if (data === "\x7f" || data === "\b") { errorHandling.testAddress = errorHandling.testAddress.slice(0, -1); return; }
-              if (data.length === 1 && (data >= "0" && data <= "9" || data === ".")) { errorHandling.testAddress += data; return; }
-              return;
+              if (data === "\x7f" || data === "\b") { errorHandling.testAddress = errorHandling.testAddress.slice(0, -1); invalidate(); tui.requestRender(); return; }
+              if (data.length === 1 && (data >= "0" && data <= "9" || data === ".")) { errorHandling.testAddress += data; invalidate(); tui.requestRender(); return; }
+              invalidate(); tui.requestRender(); return;
             }
             const isUp = keybindings.matches(data, "tui.select.up");
             const isDown = keybindings.matches(data, "tui.select.down");
-            if (isUp && errorCursor > 0) { errorCursor--; return; }
-            if (isDown && errorCursor < 1) { errorCursor++; return; }
-            if (data === " ") { errorHandling.networkTestOnFail = !errorHandling.networkTestOnFail; return; }
+            if (isUp && errorCursor > 0) { errorCursor--; invalidate(); tui.requestRender(); return; }
+            if (isDown && errorCursor < 1) { errorCursor++; invalidate(); tui.requestRender(); return; }
+            if (data === " ") { errorHandling.networkTestOnFail = !errorHandling.networkTestOnFail; invalidate(); tui.requestRender(); return; }
             if (data === "\r" || data === "\n") {
               if (errorCursor === 1) { editingAddress = true; }
-              return;
+              invalidate(); tui.requestRender(); return;
             }
-            if (keybindings.matches(data, "tui.select.cancel")) { screen = "menu"; return; }
-            return;
+            if (keybindings.matches(data, "tui.select.cancel")) { screen = "menu"; invalidate(); tui.requestRender(); return; }
+            invalidate(); tui.requestRender(); return;
           }
 
           // ── About screen ──
           if (screen === "about") {
             if (data === "\x1b" || keybindings.matches(data, "tui.select.cancel") || data === "\r" || data === "\n") {
-              screen = "menu"; return;
+              screen = "menu"; invalidate(); tui.requestRender(); return;
             }
-            return;
+            invalidate(); tui.requestRender(); return;
           }
-        },
+        }
+
+        return { render, handleInput, invalidate };
       });
     },
   });
