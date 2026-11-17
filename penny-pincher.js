@@ -236,10 +236,14 @@ export default function (pi) {
         const chl = ch.toLowerCase();
         if (screen === "select") {
           for (let i = addCursor + 1; i < allModels.length; i++) {
-            if ((allModels[i].name || allModels[i].id || "").toLowerCase().startsWith(chl)) { addCursor = i; return true; }
+            const m = allModels[i];
+            if (!m) continue;
+            if ((m.name || m.id || "").toLowerCase().startsWith(chl)) { addCursor = i; return true; }
           }
           for (let i = 0; i <= addCursor; i++) {
-            if ((allModels[i].name || allModels[i].id || "").toLowerCase().startsWith(chl)) { addCursor = i; return true; }
+            const m = allModels[i];
+            if (!m) continue;
+            if ((m.name || m.id || "").toLowerCase().startsWith(chl)) { addCursor = i; return true; }
           }
         } else if (screen === "priority") {
           const items = getItems();
@@ -278,6 +282,7 @@ export default function (pi) {
         let currentProv = null;
         for (let idx = 0; idx < allModels.length; idx++) {
           const m = allModels[idx];
+          if (!m || !m.provider || !m.id) continue;
           if (m.provider !== currentProv) { currentProv = m.provider; lines.push(theme.fg("dim", `  ── ${currentProv} ──`)); }
           if (idx === addCursor) cursorLine = lines.length;
           const inFree = free.includes(`${m.provider}/${m.id}`);
@@ -453,6 +458,7 @@ export default function (pi) {
             if (isDown && addCursor < allModels.length - 1) { addCursor++; invalidate(); tui.requestRender(); return; }
 
             if (data === " " && allModels.length > 0) {
+              if (addCursor >= allModels.length) { clamp(); }
               const m = allModels[addCursor];
               if (m) {
                 const key = `${m.provider}/${m.id}`;
@@ -466,6 +472,7 @@ export default function (pi) {
             }
 
             if (data === "f" || data === "F") {
+              if (allModels.length === 0 || addCursor >= allModels.length) { invalidate(); tui.requestRender(); return; }
               const m = allModels[addCursor];
               if (m) {
                 const key = `${m.provider}/${m.id}`;
@@ -477,6 +484,7 @@ export default function (pi) {
               invalidate(); tui.requestRender(); return;
             }
             if (data === "p" || data === "P") {
+              if (allModels.length === 0 || addCursor >= allModels.length) { invalidate(); tui.requestRender(); return; }
               const m = allModels[addCursor];
               if (m) {
                 const key = `${m.provider}/${m.id}`;
