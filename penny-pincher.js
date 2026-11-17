@@ -104,8 +104,12 @@ export default function (pi) {
         // Build catalog from all global Pi providers
         let providerCatalog = [];
         try {
-          const allProviders = ctx.modelRegistry.getProviders?.() ?? [];
-          providerCatalog = allProviders.map(p => ({ id: p.id, name: p.name })).sort((a, b) => a.name.localeCompare(b.name));
+          const allModels = ctx.modelRegistry.getAll?.() ?? [];
+          const providerIds = [...new Set(allModels.map(m => m.provider))];
+          providerCatalog = providerIds.map(id => ({
+            id,
+            name: ctx.modelRegistry.getProviderDisplayName(id) || id
+          })).sort((a, b) => a.name.localeCompare(b.name));
         } catch (_) {
           providerCatalog = DEFAULT_PROVIDERS.slice();
         }
