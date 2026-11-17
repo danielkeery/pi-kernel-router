@@ -136,7 +136,7 @@ export default function (pi) {
 
   // ── Virtual model ──────────────────────────────────────────────────
   pi.registerVirtualModel({
-    provider: "radium",
+    provider: "optomizer",
     id: "optomizer",
     name: "Optomizer (free-first + fallback)",
     thinkingLevels: ["off", "low", "medium", "high", "xhigh", "max"],

@@ -1,10 +1,10 @@
 {
   "$schema": "https://pi.dev/schemas/settings.schema.json",
   "defaultProvider": "radium",
-  "defaultModel": "radium/optomizer",
+  "defaultModel": "optomizer/optomizer",
   "defaultThinkingLevel": "medium",
   "enabledModels": [
-    "radium/optomizer",
+    "optomizer/optomizer",
     "radium/hal-1.0",
     "radium/clarke-1.0",
     "radium/tycho-1.0",
