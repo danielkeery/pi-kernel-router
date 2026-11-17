@@ -104,14 +104,23 @@ function resolveEntry(registry, entry) {
   return null;
 }
 
-function getFailedEntryIndex(failedModelId) {
-  if (!failedModelId) return -1;
+function getFailedEntryIndex(failedModel) {
+  if (!failedModel) return -1;
+  const { provider, id } = failedModel;
+  // Build the key as stored in config: "provider/model"
+  const key = provider && id ? `${provider}/${id}` : null;
   const all = [...config.free, ...config.paid];
-  let idx = all.indexOf(failedModelId);
-  if (idx >= 0) return idx;
-  const prov = failedModelId.split("/")[0];
-  idx = all.findIndex(e => e === prov || e.startsWith(prov + "/"));
-  return idx;
+  if (key) {
+    const idx = all.indexOf(key);
+    if (idx >= 0) return idx;
+  }
+  // Fallback: match by provider prefix
+  const prov = provider || (typeof failedModel === "string" ? failedModel.split("/")[0] : null);
+  if (prov) {
+    const idx = all.findIndex(e => e === prov || e.startsWith(prov + "/"));
+    if (idx >= 0) return idx;
+  }
+  return -1;
 }
 
 function entryProvider(entry) {
@@ -551,8 +560,8 @@ export default function (pi) {
     return /context.length|too many tokens/i.test(failed.message?.errorMessage || "");
   }
 
-  function nextTier(ctx, failedModelId, level) {
-    const idx = getFailedEntryIndex(failedModelId);
+  function nextTier(ctx, failedModel, level) {
+    const idx = getFailedEntryIndex(failedModel);
     const all = [...config.free, ...config.paid];
     const isLow = level === "off" || level === "low";
 
@@ -583,7 +592,7 @@ export default function (pi) {
       const isLow = level === "off" || level === "low";
 
       if ((request.reason === "retry" || request.reason === "continuation") && request.failed) {
-        const failedModelId = request.failed.model?.id || request.previous?.model?.id;
+        const failedModel = request.failed.model || request.previous?.model;
         const gw = pingGateway(config.gatewayIp);
 
         if (gw === "offline") {
@@ -605,7 +614,7 @@ export default function (pi) {
           }
         }
 
-        const fallback = nextTier(ctx, failedModelId, level);
+        const fallback = nextTier(ctx, failedModel, level);
         if (fallback?.model) return { model: fallback.model, thinkingLevel: fallback.thinkingLevel, state: { gateway: { ip: config.gatewayIp, status: "online" } } };
 
         return { model: request.previous?.model, thinkingLevel: level, state: { gateway: { ip: config.gatewayIp, status: "online" } } };
