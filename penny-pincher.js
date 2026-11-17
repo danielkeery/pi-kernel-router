@@ -190,7 +190,7 @@ export default function (pi) {
                 }
               }
               lines.push("");
-              lines.push(theme.fg("dim", "  [↑↓] move  [Space] toggle move  [p] free/paid  [d] delete  [a] add  [Enter] done"));
+              lines.push("  [↑↓] move  [Space] toggle move  [p] free/paid  [d] delete  [Tab] add  [Enter] done");
             }
             cachedLines = lines.map(l => l.length > width ? l.slice(0, width) : l);
             return cachedLines;
@@ -253,7 +253,7 @@ export default function (pi) {
               return;
             }
 
-            if (data === "a" || data === "A") {
+            if (data === "\t") {
               screen = "add";
               addCursor = 0;
               moveMode = false;
