@@ -1,21 +1,35 @@
-// Freemium Penny-Pincher — Free-First AI Model Router + Radium fallback via freemium provider
+// Freemium Penny-Pincher — Free-First AI Model Router with interactive provider config
 //
 // Gateway check: when a request fails, pings the configured gateway.
 //   - Gateway unreachable → stay on the SAME model (retry loop, don't switch)
 //   - Gateway reachable   → proceed with fallback chain
 //
-// Configure: /set-router-gateway <IP>  (default: 192.168.43.100)
-// Check status: gateway status shown in router state
+// Commands:
+//   /freemium configure  — Interactive TUI to select/reorder free providers
+//   /freemium optimize   — Suggest best positioning based on capability/cost
+//   /set-router-gateway   — Set the gateway IP for network-liveness checks
 //
-// Tier 1 (Free):    Google Gemini → AMD TokenLab → Cline → Groq → Kilo → Xkiro → Requesty
-// Tier 2 (Budget):  Tycho 1.0 ($0.10/$1.50) — fast builds, no reasoning
-// Tier 3 (Balanced): Clarke 1.0 ($0.75/$4.50) — everyday coding, 200K ctx
-// Tier 4 (Best):    Hal 1.0 ($2.00/$10.00) — heavy reasoning, RE analysis
+// Default free providers: Google Gemini → AMD TokenLab → Cline → Groq → Kilo → Xkiro → Requesty
+// Paid fallback (always at end): Tycho → Clarke → Hal (via the freemium provider)
 
 const { execSync } = require("child_process");
 
-// ── Config store for gateway IP ─────────────────────────────────────────
-const config = { gatewayIp: "192.168.43.100" };
+// ── Provider definitions ─────────────────────────────────────────
+const ALL_PROVIDERS = [
+  { id: "google",    name: "Google Gemini",        low: "gemini-2.5-flash",              high: "gemini-2.5-flash" },
+  { id: "amd-tokenlab", name: "AMD TokenLab",      low: "DeepSeek-V4-Flash",             high: "DeepSeek-V4-Flash" },
+  { id: "cline",     name: "Cline",                low: "cohere/north-mini-code:free",    high: "openrouter/free" },
+  { id: "groq",      name: "Groq",                 low: "llama-3.1-8b-instant",         high: "llama-3.3-70b-specdec" },
+  { id: "kilo",      name: "Kilo",                 low: "kilo-auto/free",                high: "kilo-auto/free" },
+  { id: "xkiro",     name: "Xkiro",                low: "mistralai/ministral-14b",       high: "mistralai/codestral-2508" },
+  { id: "requesty",  name: "Requesty",             low: "nvidia/nemotron-3-nano-30b-a3b", high: "google/gemma-4-31b-it" },
+];
+
+// ── Runtime config ───────────────────────────────────────────────
+const config = {
+  gatewayIp: "192.168.43.100",
+  providers: ALL_PROVIDERS.map(p => p.id), // default: all free providers in order
+};
 
 function pingGateway(ip) {
   try {
@@ -42,12 +56,36 @@ function getFailedProvider(failedModelId) {
   return null;
 }
 
-const FALLBACK_TIERS = ["google", "amd-tokenlab", "cline", "groq", "kilo", "xkiro", "requesty", "tycho", "clarke", "hal"];
+function makeFallbackTiers() {
+  return [...config.providers, "tycho", "clarke", "hal"];
+}
 
+// ── Suggest an optimised order ──────────────────────────────────
+const CAPABILITY_RANK = [
+  "google",       // Gemini 2.5 Flash — highest capability free model
+  "groq",         // Groq Llama 3.3 70B — strong reasoning
+  "amd-tokenlab", // DeepSeek V4 Flash — good coding
+  "cline",        // Cline OpenRouter free
+  "xkiro",        // Codestral/Ministral
+  "kilo",         // Kilo auto
+  "requesty",     // Nemotron/Gemma 4
+];
+
+function suggestOrder(selected) {
+  // Sort selected providers by capability rank, keeping unranked at end
+  const ranked = [...selected].sort((a, b) => {
+    const ia = CAPABILITY_RANK.indexOf(a);
+    const ib = CAPABILITY_RANK.indexOf(b);
+    return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
+  });
+  return ranked;
+}
+
+// ── Extension entry point ───────────────────────────────────────
 export default function (pi) {
-  // ── Register the freemium provider (Radium models under freemium name) ──
+  // ── Register the freemium provider (paid fallback models) ────────
   pi.registerProvider("freemium", {
-    name: "Freemium (Radium fallback)",
+    name: "Freemium (paid fallback)",
     baseUrl: "https://api.radium.cloud/v1",
     api: "openai-completions",
     apiKey: "$FREEMIUM_API_KEY",
@@ -85,7 +123,7 @@ export default function (pi) {
 
   // ── Slash command: /set-router-gateway ─────────────────────────────
   pi.registerCommand("set-router-gateway", {
-    description: "Set the gateway IP used by the penny-pincher router for network-liveness checks. Ping result tells the router whether to retry (offline) or fall back (online).",
+    description: "Set the gateway IP for network-liveness checks",
     handler: async (args, ctx) => {
       const ip = args.trim();
       if (!ip) {
@@ -95,13 +133,204 @@ export default function (pi) {
         );
         return;
       }
-      const before = config.gatewayIp;
       config.gatewayIp = ip;
       const status = pingGateway(ip);
       ctx.ui.notify(
         `Gateway ${ip}: ${status}. Router will use ${ip} for network checks.`,
         status === "online" ? "info" : "warning"
       );
+    },
+  });
+
+  // ── Slash command: /freemium configure ───────────────────────────
+  pi.registerCommand("freemium", {
+    description: "Configure free provider selection, priority, and optimization",
+    handler: async (args, ctx) => {
+      const subcmd = args.trim().split(/\s+/)[0];
+
+      // ── /freemium optimize ──────────────────────────────────────
+      if (subcmd === "optimize") {
+        const suggested = suggestOrder(config.providers);
+        const current = config.providers.join(" → ");
+        const proposed = suggested.join(" → ");
+
+        if (current === proposed) {
+          ctx.ui.notify("Already optimal! ✓", "info");
+          return;
+        }
+
+        const ok = await ctx.ui.confirm(
+          "Optimize provider order?",
+          `Current:  ${current}\nProposed: ${proposed}\n\nApply suggested order?`
+        );
+        if (ok) {
+          config.providers = suggested;
+          ctx.ui.notify(`Applied: ${proposed}`, "info");
+        } else {
+          ctx.ui.notify("Order unchanged", "info");
+        }
+        return;
+      }
+
+      // ── /freemium configure (default) ───────────────────────────
+      if (subcmd === "configure" || subcmd === "") {
+        if (ctx.mode !== "tui") {
+          ctx.ui.notify("/freemium configure requires TUI mode", "error");
+          return;
+        }
+
+        const result = await ctx.ui.custom((tui, theme, keybindings, done) => {
+          const configured = [...config.providers];
+          let cursor = 0;
+          let showAll = false;       // false = configured only, true = all
+          let cachedWidth = undefined;
+          let cachedLines = undefined;
+          let message = "";
+
+          function getVisible() {
+            if (showAll) {
+              // All providers, with configured ones marked
+              return ALL_PROVIDERS.map(p => ({
+                ...p,
+                inConfig: configured.includes(p.id),
+                configIdx: configured.indexOf(p.id),
+              }));
+            }
+            // Only configured, in order
+            return ALL_PROVIDERS
+              .filter(p => configured.includes(p.id))
+              .map(p => ({
+                ...p,
+                inConfig: true,
+                configIdx: configured.indexOf(p.id),
+              }));
+          }
+
+          // Clamp cursor
+          function clamp() { cursor = Math.max(0, Math.min(cursor, Math.max(0, getVisible().length - 1))); }
+
+          function render(width) {
+            if (cachedLines && cachedWidth === width) return cachedLines;
+            cachedWidth = width;
+
+            const items = getVisible();
+            clamp();
+            const lines = [];
+
+            lines.push(theme.style("  Freemium Penny-Pincher — Provider Configuration", { fg: "accent", bold: true }));
+            lines.push("");
+            lines.push(theme.fg("dim", `  ${showAll ? "Configured" : "All available"} — [Tab] toggle view  [Space] toggle  [↑↓/u/d] move  [o] optimize  [Enter] done`));
+            lines.push("");
+
+            const namePad = Math.max(...ALL_PROVIDERS.map(p => p.name.length), 0);
+
+            items.forEach((p, i) => {
+              const arrow = i === cursor ? theme.fg("accent", " →") : "  ";
+              const idx = p.configIdx >= 0 ? theme.fg("accent", `#${p.configIdx + 1}`) : "   ";
+              const check = showAll ? (p.inConfig ? theme.fg("success", " ✓") : "  ") : "";
+              const name = `${idx} ${p.name.padEnd(namePad)}`;
+              const styled = i === cursor ? theme.bg("highlight", `${arrow} ${name}${check}`) : `  ${name}${check}`;
+              lines.push(`  ${styled}`);
+            });
+
+            if (message) {
+              lines.push("");
+              lines.push(theme.fg("accent", `  ${message}`));
+              lines.push(theme.fg("dim", "  [Enter] to confirm and exit"));
+            }
+
+            cachedLines = lines.map(l => {
+              if (l.length > width) return l.slice(0, width);
+              return l;
+            });
+            return cachedLines;
+          }
+
+          function invalidate() { cachedWidth = undefined; cachedLines = undefined; }
+
+          function handleInput(data) {
+            message = "";
+            const items = getVisible();
+            clamp();
+
+            const isUp = keybindings.matches(data, "tui.select.up") || data === "u";
+            const isDown = keybindings.matches(data, "tui.select.down") || data === "d";
+
+            if (isUp && items.length > 1) {
+              if (cursor > 0) {
+                // Move provider up in priority
+                const curId = items[cursor].id;
+                const targetId = items[cursor - 1].id;
+                const ci = configured.indexOf(curId);
+                const ti = configured.indexOf(targetId);
+                if (ci >= 0 && ti >= 0) {
+                  [configured[ci], configured[ti]] = [configured[ti], configured[ci]];
+                  cursor--;
+                }
+              }
+            } else if (isDown && items.length > 1) {
+              if (cursor < items.length - 1) {
+                const curId = items[cursor].id;
+                const targetId = items[cursor + 1].id;
+                const ci = configured.indexOf(curId);
+                const ti = configured.indexOf(targetId);
+                if (ci >= 0 && ti >= 0) {
+                  [configured[ci], configured[ti]] = [configured[ti], configured[ci]];
+                  cursor++;
+                }
+              }
+            } else if (data === " ") {
+              // Space: toggle provider in/out of configured
+              const p = items[cursor];
+              if (configured.includes(p.id)) {
+                configured.splice(configured.indexOf(p.id), 1);
+              } else {
+                configured.push(p.id);
+              }
+            } else if (data === "\t") {
+              // Tab: toggle view mode
+              showAll = !showAll;
+            } else if (data === "o") {
+              // o: suggest optimization
+              const suggested = suggestOrder(configured);
+              if (suggested.join(",") !== configured.join(",")) {
+                configured.length = 0;
+                configured.push(...suggested);
+                message = `Suggested order applied!`;
+              } else {
+                message = "Already optimal!";
+              }
+            } else if (data === "\r" || data === "\n") {
+              // Enter: confirm
+              config.providers = configured;
+              done(null);
+              return;
+            } else {
+              return;
+            }
+
+            invalidate();
+            tui.requestRender();
+          }
+
+          return { render, invalidate, handleInput };
+        });
+
+        ctx.ui.notify(`Providers saved (${config.providers.length} active)`, "info");
+        return;
+      }
+
+      // ── /freemium list (quick status) ───────────────────────────
+      if (subcmd === "list" || subcmd === "status") {
+        const chain = [...config.providers, "tycho", "clarke", "hal"].join(" → ");
+        ctx.ui.notify(
+          `Free providers: ${config.providers.join(", ")}\nFull chain: ${chain}`,
+          "info"
+        );
+        return;
+      }
+
+      ctx.ui.notify("Usage: /freemium {configure|optimize|list|status}", "info");
     },
   });
 
@@ -134,23 +363,18 @@ export default function (pi) {
   }
 
   function nextTier(ctx, failedModelId, level) {
+    const tiers = makeFallbackTiers();
     const current = getFailedProvider(failedModelId);
-    const idx = current ? FALLBACK_TIERS.indexOf(current) : -1;
+    const idx = current ? tiers.indexOf(current) : -1;
     const isLow = level === "off" || level === "low";
 
-    if (current && FALLBACK_TIERS.indexOf(current) <= FALLBACK_TIERS.indexOf("requesty")) {
-      for (let i = Math.max(idx + 1, 0); i <= FALLBACK_TIERS.indexOf("requesty"); i++) {
-        const nextProv = FALLBACK_TIERS[i];
-        const idMap = {
-          "google": { low: "gemini-2.5-flash", high: "gemini-2.5-flash" },
-          "groq": { low: "llama-3.1-8b-instant", high: "llama-3.3-70b-specdec" },
-          "cline": { low: "cohere/north-mini-code:free", high: "openrouter/free" },
-          "kilo": { low: "kilo-auto/free", high: "kilo-auto/free" },
-          "amd-tokenlab": { low: "DeepSeek-V4-Flash", high: "DeepSeek-V4-Flash" },
-          "xkiro": { low: "mistralai/ministral-14b", high: "mistralai/codestral-2508" },
-          "requesty": { low: "nvidia/nemotron-3-nano-30b-a3b", high: "google/gemma-4-31b-it" },
-        };
-        const m = idMap[nextProv] ? find(ctx, nextProv, idMap[nextProv].high) : null;
+    if (current && tiers.indexOf(current) <= tiers.indexOf("requesty")) {
+      for (let i = Math.max(idx + 1, 0); i <= tiers.indexOf("requesty"); i++) {
+        const nextProv = tiers[i];
+        const pdef = ALL_PROVIDERS.find(p => p.id === nextProv);
+        if (!pdef) continue;
+        const modelId = isLow ? pdef.low : pdef.high;
+        const m = find(ctx, nextProv, modelId);
         if (m) {
           return {
             model: m,
@@ -160,8 +384,8 @@ export default function (pi) {
       }
     }
 
-    for (let i = Math.max(idx + 1, FALLBACK_TIERS.indexOf("tycho")); i < FALLBACK_TIERS.length; i++) {
-      const r = getFreemiumModel(ctx, FALLBACK_TIERS[i], level);
+    for (let i = Math.max(idx + 1, tiers.indexOf("tycho")); i < tiers.length; i++) {
+      const r = getFreemiumModel(ctx, tiers[i], level);
       if (r?.model) return r;
     }
 
@@ -190,12 +414,9 @@ export default function (pi) {
       if ((request.reason === "retry" || request.reason === "continuation") && request.failed) {
         const failedModelId = request.failed.model?.id || request.previous?.model?.id;
 
-        // Ping the configured gateway
         const gw = pingGateway(config.gatewayIp);
-        const gatewayMsg = `[Router] Gateway ${config.gatewayIp}: ${gw}`;
 
         if (gw === "offline") {
-          // ── NETWORK DOWN: stay on the same model → Pi retry loop ──
           const sticky = request.previous;
           if (sticky) {
             return {
@@ -206,7 +427,6 @@ export default function (pi) {
           }
         }
 
-        // ── NETWORK UP: real model failure → escalate ──────────────
         if (isContextOverflow(request.failed)) {
           const target = find(ctx, "freemium", "clarke-1.0")
             || find(ctx, "freemium", "hal-1.0");
@@ -217,7 +437,6 @@ export default function (pi) {
           };
         }
 
-        // Normal fallback through the chain
         const fallback = nextTier(ctx, failedModelId, level);
         if (fallback?.model) return {
           model: fallback.model,
@@ -245,41 +464,20 @@ export default function (pi) {
       const freeCandidates = [];
 
       if (isLow) {
-        freeCandidates.push(
-          find(ctx, "google", "gemini-2.5-flash"),
-          find(ctx, "amd-tokenlab", "DeepSeek-V4-Flash"),
-          find(ctx, "cline", "cohere/north-mini-code:free"),
-          find(ctx, "groq", "llama-3.1-8b-instant"),
-          find(ctx, "kilo", "kilo-auto/free"),
-          find(ctx, "xkiro", "mistralai/ministral-14b"),
-          find(ctx, "requesty", "nvidia/nemotron-3-nano-30b-a3b"),
-          find(ctx, "groq", "llama-3.3-70b-specdec"),
-          find(ctx, "amd-tokenlab", "Qwen3.8-27B"),
-          find(ctx, "xkiro", "mistralai/codestral-2508"),
-        );
+        for (const pid of config.providers) {
+          const p = ALL_PROVIDERS.find(x => x.id === pid);
+          if (p) freeCandidates.push(find(ctx, pid, p.low));
+        }
       } else if (isHigh) {
-        freeCandidates.push(
-          find(ctx, "google", "gemini-2.5-flash"),
-          find(ctx, "amd-tokenlab", "DeepSeek-V4-Flash"),
-          find(ctx, "cline", "openrouter/free"),
-          find(ctx, "groq", "llama-3.3-70b-specdec"),
-          find(ctx, "kilo", "kilo-auto/free"),
-          find(ctx, "xkiro", "mistralai/codestral-2508"),
-          find(ctx, "groq", "llama-3.1-8b-instant"),
-          find(ctx, "amd-tokenlab", "Qwen3.8-27B"),
-        );
+        for (const pid of config.providers) {
+          const p = ALL_PROVIDERS.find(x => x.id === pid);
+          if (p) freeCandidates.push(find(ctx, pid, p.high));
+        }
       } else {
-        freeCandidates.push(
-          find(ctx, "google", "gemini-2.5-flash"),
-          find(ctx, "amd-tokenlab", "DeepSeek-V4-Flash"),
-          find(ctx, "cline", "openrouter/free"),
-          find(ctx, "groq", "llama-3.3-70b-specdec"),
-          find(ctx, "kilo", "kilo-auto/free"),
-          find(ctx, "xkiro", "mistralai/codestral-2508"),
-          find(ctx, "groq", "llama-3.1-8b-instant"),
-          find(ctx, "requesty", "nvidia/nemotron-3-nano-30b-a3b"),
-          find(ctx, "amd-tokenlab", "Qwen3.8-27B"),
-        );
+        for (const pid of config.providers) {
+          const p = ALL_PROVIDERS.find(x => x.id === pid);
+          if (p) freeCandidates.push(find(ctx, pid, p.high));
+        }
       }
 
       for (const m of freeCandidates) {
