@@ -175,21 +175,6 @@ function truncate(line, width) {
 }
 
 export default function (pi) {
-  pi.registerCommand("set-router-gateway", {
-    description: "Set the gateway IP for network-liveness checks (usage: /set-router-gateway <IP>)",
-    handler: async (args, ctx) => {
-      const ip = args.trim();
-      if (!ip) {
-        ctx.ui.notify(`Current gateway: ${config.gatewayIp} — usage: /set-router-gateway <IP>`, "info");
-        return;
-      }
-      config.gatewayIp = ip;
-      saveConfig();
-      const status = pingAddress(ip);
-      ctx.ui.notify(`Gateway ${ip}: ${status}`, status === "online" ? "info" : "warning");
-    },
-  });
-
   pi.registerCommand("freemium-configure", {
     description: "Multi-screen configuration TUI (Provider Selection, Priority, Error Handling, About)",
     handler: async (_args, ctx) => {
