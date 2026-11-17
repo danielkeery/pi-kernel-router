@@ -147,7 +147,7 @@ export default function (pi) {
                 const arrow = i === addCursor ? theme.fg("accent", " →") : "  ";
                 const mark = isActive ? theme.fg("success", " ✓") : "   ";
                 const label = `${arrow} ${p.name}${mark}`;
-                lines.push(i === addCursor ? theme.bg("highlight", `  ${label}`) : `  ${label}`);
+                lines.push(i === addCursor ? theme.style(`  ${label}`, {fg: "accent", bold: true}) : `  ${label}`);
               }
               lines.push("");
               lines.push(theme.fg("dim", "  [Enter] add  [Esc/Tab] back"));
@@ -172,7 +172,7 @@ export default function (pi) {
                     const moving = globalIdx === cursor && moveMode;
                     const prefix = moving ? theme.fg("accent", " ◉") : selected ? theme.fg("accent", " ○") : "  ";
                     const label = ` ${prefix} #${globalIdx + 1} ${p.name}`;
-                    lines.push(moving ? theme.bg("highlight", `  ${label}  [↑↓] move  [Space] done  [d] remove`) : `  ${label}`);
+                    lines.push(moving ? theme.style(`  ${label}  [↑↓] move  [Space] done  [d] remove`, {fg: "accent", bold: true}) : `  ${label}`);
                   });
                 }
                 if (paidItems.length > 0) {
@@ -185,7 +185,7 @@ export default function (pi) {
                     const moving = globalIdx === cursor && moveMode;
                     const prefix = moving ? theme.fg("accent", " ◉") : selected ? theme.fg("accent", " ○") : "  ";
                     const label = ` ${prefix} #${globalIdx + 1} ${p.name}`;
-                    lines.push(moving ? theme.bg("highlight", `  ${label}  [↑↓] move  [Space] done  [d] remove`) : `  ${label}`);
+                    lines.push(moving ? theme.style(`  ${label}  [↑↓] move  [Space] done  [d] remove`, {fg: "accent", bold: true}) : `  ${label}`);
                   });
                 }
               }
