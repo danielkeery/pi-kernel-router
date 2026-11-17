@@ -1,12 +1,15 @@
 // Freemium Penny-Pincher — Free-First AI Model Router with configurable paid fallback
 //
 // Routes through free provider/models first in your configured order, then paid.
-// /freemium configure: model-level selection and ordering with scrollable TUI.
+// /freemium-configure: model-level selection and ordering with scrollable TUI.
 //
 // Commands:
-//   /freemium configure  — Interactive TUI to select/reorder free & paid models
-//   /freemium optimize   — Suggest best ordering by provider capability
+//   /freemium-configure  — Interactive TUI to select/reorder free & paid models
+//   /freemium-optimize   — Suggest best ordering by provider capability
+//   /freemium-list       — Show current free and paid model chains
+//   /freemium-status     — Alias for /freemium-list
 //   /set-router-gateway   — Set gateway IP for network-liveness checks
+//   /freemium            — Show usage help
 
 const { execSync } = require("child_process");
 
@@ -35,7 +38,6 @@ function migrateConfig(registry) {
     config.free = config.free.map(pid => {
       const pdef = DEFAULT_PROVIDERS.find(p => p.id === pid);
       if (pdef?.low) return `${pid}/${pdef.low}`;
-      // Try registry lookup
       try {
         const prov = registry?.getProvider?.(pid);
         if (prov?.getModels) {
@@ -92,7 +94,6 @@ function resolveEntry(registry, entry) {
     const modelId = rest.join("/");
     return registry.find(provider, modelId);
   }
-  // Legacy provider-only fallback
   try {
     const prov = registry.getProvider(entry);
     if (prov?.getModels) {
@@ -106,10 +107,8 @@ function resolveEntry(registry, entry) {
 function getFailedEntryIndex(failedModelId) {
   if (!failedModelId) return -1;
   const all = [...config.free, ...config.paid];
-  // Exact match on "provider/model"
   let idx = all.indexOf(failedModelId);
   if (idx >= 0) return idx;
-  // Match by provider prefix
   const prov = failedModelId.split("/")[0];
   idx = all.findIndex(e => e === prov || e.startsWith(prov + "/"));
   return idx;
@@ -130,10 +129,22 @@ function entryLabel(entry, registry) {
   return entry;
 }
 
+// ── Usage text for /freemium help command ──────────────────────
+function showUsage(ctx) {
+  ctx.ui.notify(
+    `Penny-Pincher commands:\n` +
+    `  /freemium-configure — Interactive model selection & ordering\n` +
+    `  /freemium-optimize  — Auto-sort free chain by capability\n` +
+    `  /freemium-list      — Show current free → paid chains\n` +
+    `  /freemium-status    — Alias for /freemium-list\n` +
+    `  /set-router-gateway <IP> — Set gateway for network checks`,
+    "info"
+  );
+}
+
 export default function (pi) {
-  // ── /set-router-gateway ──────────────────────────────────────
   pi.registerCommand("set-router-gateway", {
-    description: "Set the gateway IP for network-liveness checks",
+    description: "Set the gateway IP for network-liveness checks (usage: /set-router-gateway <IP>)",
     handler: async (args, ctx) => {
       const ip = args.trim();
       if (!ip) {
@@ -146,373 +157,391 @@ export default function (pi) {
     },
   });
 
-  // ── /freemium ────────────────────────────────────────────────
-  pi.registerCommand("freemium", {
-    description: "Configure provider/model selection, paid/free priority, and optimization",
-    handler: async (args, ctx) => {
+  pi.registerCommand("freemium-optimize", {
+    description: "Suggest best free model ordering by provider capability",
+    handler: async (_args, ctx) => {
       migrateConfig(ctx.modelRegistry);
-      const subcmd = args.trim().split(/\s+/)[0];
+      const suggested = suggestOrder(config.free);
+      const current = config.free.join(" → ");
+      const proposed = suggested.join(" → ");
+      if (current === proposed) {
+        ctx.ui.notify("Already optimal! ✓", "info");
+        return;
+      }
+      const ok = await ctx.ui.confirm(
+        "Optimize free model order?",
+        `Current:  ${current}\nProposed: ${proposed}\n\n(Paid models unchanged)`
+      );
+      if (ok) {
+        config.free = suggested;
+        ctx.ui.notify(`Applied: ${proposed}`, "info");
+      }
+    },
+  });
 
-      if (subcmd === "optimize") {
-        const suggested = suggestOrder(config.free);
-        const current = config.free.join(" → ");
-        const proposed = suggested.join(" → ");
-        if (current === proposed) {
-          ctx.ui.notify("Already optimal! ✓", "info");
-          return;
-        }
-        const ok = await ctx.ui.confirm(
-          "Optimize free model order?",
-          `Current:  ${current}\nProposed: ${proposed}\n\n(Paid models unchanged)`
-        );
-        if (ok) {
-          config.free = suggested;
-          ctx.ui.notify(`Applied: ${proposed}`, "info");
-        }
+  pi.registerCommand("freemium-configure", {
+    description: "Interactive TUI to select/reorder free & paid models",
+    handler: async (_args, ctx) => {
+      migrateConfig(ctx.modelRegistry);
+      if (ctx.mode !== "tui") {
+        ctx.ui.notify("/freemium-configure requires TUI mode", "error");
         return;
       }
 
-      if (subcmd === "configure" || subcmd === "") {
-        if (ctx.mode !== "tui") {
-          ctx.ui.notify("/freemium configure requires TUI mode", "error");
-          return;
+      let allModels = [];
+      try {
+        allModels = (ctx.modelRegistry.getAll?.() ?? [])
+          .filter(m => m.provider && m.id)
+          .sort((a, b) => {
+            const pc = (a.provider || "").localeCompare(b.provider || "");
+            if (pc !== 0) return pc;
+            return (a.name || a.id).localeCompare(b.name || b.id);
+          });
+      } catch (_) {
+        allModels = [];
+      }
+
+      await ctx.ui.custom((tui, theme, keybindings, done) => {
+        let free = [...config.free];
+        let paid = [...config.paid];
+        let screen = "main";
+        let cursor = 0;
+        let moveMode = false;
+        let addCursor = 0;
+        let addScrollTop = 0;
+        let mainScrollTop = 0;
+        let cachedWidth = undefined;
+        let cachedLines = undefined;
+
+        const VIEWPORT = 18;
+        const pool = () => new Set([...free, ...paid]);
+
+        function getItems() {
+          const result = [];
+          for (let i = 0; i < free.length; i++) result.push({ entry: free[i], section: "free" });
+          for (let i = 0; i < paid.length; i++) result.push({ entry: paid[i], section: "paid" });
+          return result;
         }
 
-        // Build flat catalog of all available models
-        let allModels = [];
-        try {
-          allModels = (ctx.modelRegistry.getAll?.() ?? [])
-            .filter(m => m.provider && m.id)
-            .sort((a, b) => {
-              const pc = (a.provider || "").localeCompare(b.provider || "");
-              if (pc !== 0) return pc;
-              return (a.name || a.id).localeCompare(b.name || b.id);
-            });
-        } catch (_) {
-          allModels = [];
+        function clampMain() {
+          const count = free.length + paid.length;
+          if (count === 0) cursor = 0;
+          else cursor = Math.max(0, Math.min(cursor, count - 1));
+        }
+        function clampAdd() {
+          if (allModels.length === 0) addCursor = 0;
+          else addCursor = Math.max(0, Math.min(addCursor, allModels.length - 1));
         }
 
-        await ctx.ui.custom((tui, theme, keybindings, done) => {
-          let free = [...config.free];
-          let paid = [...config.paid];
-          let screen = "main"; // "main" | "add"
-          let cursor = 0;
-          let moveMode = false;
-          let addCursor = 0;
-          let addScrollTop = 0;
-          let mainScrollTop = 0;
-          let cachedWidth = undefined;
-          let cachedLines = undefined;
+        function truncate(line, width) {
+          return line.length > width ? line.slice(0, width) : line;
+        }
 
-          const VIEWPORT = 18;
-          const pool = () => new Set([...free, ...paid]);
+        function renderAdd(width) {
+          const lines = [];
+          let cursorLine = -1;
+          lines.push(theme.style("  Add Models to Router", { fg: "accent", bold: true }));
+          lines.push("");
+          lines.push(theme.fg("dim", "  [Space] toggle  [Enter/Esc] return"));
+          lines.push("");
 
-          function getItems() {
-            const result = [];
-            for (let i = 0; i < free.length; i++) result.push({ entry: free[i], section: "free" });
-            for (let i = 0; i < paid.length; i++) result.push({ entry: paid[i], section: "paid" });
-            return result;
+          let currentProv = null;
+          for (let idx = 0; idx < allModels.length; idx++) {
+            const m = allModels[idx];
+            if (m.provider !== currentProv) {
+              currentProv = m.provider;
+              lines.push(theme.fg("dim", `  ── ${currentProv} ──`));
+            }
+            if (idx === addCursor) cursorLine = lines.length;
+            const inPool = free.includes(`${m.provider}/${m.id}`) || paid.includes(`${m.provider}/${m.id}`);
+            const sel = idx === addCursor;
+            const prefix = sel ? theme.fg("accent", "> ") : "  ";
+            const mark = inPool ? theme.fg("success", "[✓]") : "[ ]";
+            const label = m.name ? `${m.provider}/${m.name}` : `${m.provider}/${m.id}`;
+            const row = `  ${prefix}${mark} ${label}`;
+            lines.push(sel ? theme.fg("accent", row) : row);
           }
 
-          function clampMain() {
-            const count = free.length + paid.length;
-            if (count === 0) cursor = 0;
-            else cursor = Math.max(0, Math.min(cursor, count - 1));
-          }
-          function clampAdd() {
-            if (allModels.length === 0) addCursor = 0;
-            else addCursor = Math.max(0, Math.min(addCursor, allModels.length - 1));
+          if (allModels.length === 0) {
+            lines.push(theme.fg("dim", "  No models available in registry"));
           }
 
-          function truncate(line, width) {
-            return line.length > width ? line.slice(0, width) : line;
+          if (cursorLine >= 0) {
+            if (cursorLine < addScrollTop) addScrollTop = cursorLine;
+            if (cursorLine >= addScrollTop + VIEWPORT) addScrollTop = cursorLine - VIEWPORT + 1;
           }
 
-          // ── Render add screen ─────────────────────────────────
-          function renderAdd(width) {
-            const lines = [];
-            let cursorLine = -1;
-            lines.push(theme.style("  Add Models to Router", { fg: "accent", bold: true }));
+          const visible = lines.slice(addScrollTop, addScrollTop + VIEWPORT);
+          return visible.map(l => truncate(l, width));
+        }
+
+        function renderMain(width) {
+          const lines = [];
+          let cursorLine = -1;
+          const items = getItems();
+          clampMain();
+
+          lines.push(theme.style("  Freemium Penny-Pincher — Configured Models", { fg: "accent", bold: true }));
+          lines.push("");
+
+          if (items.length === 0) {
+            lines.push(theme.fg("dim", "  No models configured — press Tab to add"));
             lines.push("");
-            lines.push(theme.fg("dim", "  [Space] toggle  [Enter/Esc] return"));
-            lines.push("");
-
-            let currentProv = null;
-            for (let idx = 0; idx < allModels.length; idx++) {
-              const m = allModels[idx];
-              if (m.provider !== currentProv) {
-                currentProv = m.provider;
-                lines.push(theme.fg("dim", `  ── ${currentProv} ──`));
-              }
-              if (idx === addCursor) cursorLine = lines.length;
-              const inPool = free.includes(`${m.provider}/${m.id}`) || paid.includes(`${m.provider}/${m.id}`);
-              const sel = idx === addCursor;
-              const prefix = sel ? theme.fg("accent", "> ") : "  ";
-              const mark = inPool ? theme.fg("success", "[✓]") : "[ ]";
-              const label = m.name ? `${m.provider}/${m.name}` : `${m.provider}/${m.id}`;
-              const row = `  ${prefix}${mark} ${label}`;
-              lines.push(sel ? theme.fg("accent", row) : row);
-            }
-
-            if (allModels.length === 0) {
-              lines.push(theme.fg("dim", "  No models available in registry"));
-            }
-
-            // Viewport scroll
-            if (cursorLine >= 0) {
-              const headerLines = 4; // title + blank + instructions + blank
-              const absCursor = cursorLine;
-              if (absCursor < addScrollTop) addScrollTop = absCursor;
-              if (absCursor >= addScrollTop + VIEWPORT) addScrollTop = absCursor - VIEWPORT + 1;
-            }
-
-            const visible = lines.slice(addScrollTop, addScrollTop + VIEWPORT);
-            return visible.map(l => truncate(l, width));
+            lines.push(theme.fg("dim", "  [Tab] add models  [Enter] done"));
+            return lines.map(l => truncate(l, width));
           }
 
-          // ── Render main screen ────────────────────────────────
-          function renderMain(width) {
-            const lines = [];
-            let cursorLine = -1;
-            const items = getItems();
-            clampMain();
+          const freeItems = items.filter(it => it.section === "free");
+          const paidItems = items.filter(it => it.section === "paid");
 
-            lines.push(theme.style("  Freemium Penny-Pincher — Configured Models", { fg: "accent", bold: true }));
-            lines.push("");
-
-            if (items.length === 0) {
-              lines.push(theme.fg("dim", "  No models configured — press Tab to add"));
-              lines.push("");
-              lines.push(theme.fg("dim", "  [Tab] add models  [Enter] done"));
-              return lines.map(l => truncate(l, width));
-            }
-
-            const freeItems = items.filter(it => it.section === "free");
-            const paidItems = items.filter(it => it.section === "paid");
-
-            if (freeItems.length > 0) {
-              lines.push(theme.fg("dim", "  ─ Free (tried first) ─"));
-              freeItems.forEach(it => {
-                const globalIdx = items.indexOf(it);
-                if (globalIdx === cursor) cursorLine = lines.length;
-                const selected = globalIdx === cursor && !moveMode;
-                const moving = globalIdx === cursor && moveMode;
-                const prefix = moving ? theme.fg("accent", " ◉") : selected ? theme.fg("accent", " ○") : "  ";
-                const label = ` ${prefix} #${globalIdx + 1} ${it.entry}`;
-                if (moving) {
-                  lines.push(theme.style(`  ${label}  [↑↓] move  [Space] done  [d] remove`, {fg: "accent", bold: true}));
-                } else {
-                  lines.push(`  ${label}`);
-                }
-              });
-            }
-
-            if (paidItems.length > 0) {
-              lines.push("");
-              lines.push(theme.fg("dim", "  ─ Paid (fallback) ─"));
-              paidItems.forEach(it => {
-                const globalIdx = items.indexOf(it);
-                if (globalIdx === cursor) cursorLine = lines.length;
-                const selected = globalIdx === cursor && !moveMode;
-                const moving = globalIdx === cursor && moveMode;
-                const prefix = moving ? theme.fg("accent", " ◉") : selected ? theme.fg("accent", " ○") : "  ";
-                const label = ` ${prefix} #${globalIdx + 1} ${it.entry}`;
-                if (moving) {
-                  lines.push(theme.style(`  ${label}  [↑↓] move  [Space] done  [d] remove`, {fg: "accent", bold: true}));
-                } else {
-                  lines.push(`  ${label}`);
-                }
-              });
-            }
-
-            lines.push("");
-            lines.push(theme.fg("dim", "  [↑↓] move  [Space] toggle move  [p] free/paid  [d] delete  [Tab] add  [Enter] done"));
-
-            if (cursorLine >= 0) {
-              if (cursorLine < mainScrollTop) mainScrollTop = cursorLine;
-              if (cursorLine >= mainScrollTop + VIEWPORT) mainScrollTop = cursorLine - VIEWPORT + 1;
-            }
-
-            const visible = lines.slice(mainScrollTop, mainScrollTop + VIEWPORT);
-            return visible.map(l => truncate(l, width));
-          }
-
-          function render(width) {
-            if (cachedLines && cachedWidth === width) return cachedLines;
-            cachedWidth = width;
-            cachedLines = screen === "add" ? renderAdd(width) : renderMain(width);
-            return cachedLines;
-          }
-
-          function invalidate() { cachedWidth = undefined; cachedLines = undefined; }
-
-          function handleInput(data) {
-            if (screen === "add") {
-              const poolSet = pool();
-              clampAdd();
-
-              if (keybindings.matches(data, "tui.select.up")) {
-                if (addCursor > 0) addCursor--;
-              } else if (keybindings.matches(data, "tui.select.down")) {
-                if (addCursor < allModels.length - 1) addCursor++;
-              } else if (keybindings.matches(data, "tui.select.cancel")) {
-                screen = "main";
-                moveMode = false;
-                invalidate();
-                tui.requestRender();
-                return;
-              } else if (data === "\r" || data === "\n") {
-                screen = "main";
-                moveMode = false;
-                invalidate();
-                tui.requestRender();
-                return;
-              } else if (data === "\t") {
-                screen = "main";
-                moveMode = false;
-                invalidate();
-                tui.requestRender();
-                return;
-              } else if (data === " ") {
-                const m = allModels[addCursor];
-                if (m) {
-                  const key = `${m.provider}/${m.id}`;
-                  const fi = free.indexOf(key);
-                  const pi = paid.indexOf(key);
-                  if (fi >= 0) {
-                    free.splice(fi, 1);
-                  } else if (pi >= 0) {
-                    paid.splice(pi, 1);
-                  } else {
-                    free.push(key);
-                  }
-                }
+          if (freeItems.length > 0) {
+            lines.push(theme.fg("dim", "  ─ Free (tried first) ─"));
+            freeItems.forEach(it => {
+              const globalIdx = items.indexOf(it);
+              if (globalIdx === cursor) cursorLine = lines.length;
+              const selected = globalIdx === cursor && !moveMode;
+              const moving = globalIdx === cursor && moveMode;
+              const prefix = moving ? theme.fg("accent", " ◉") : selected ? theme.fg("accent", " ○") : "  ";
+              const label = ` ${prefix} #${globalIdx + 1} ${it.entry}`;
+              if (moving) {
+                lines.push(theme.style(`  ${label}  [↑↓] move  [Space] done  [d] remove`, {fg: "accent", bold: true}));
               } else {
-                return;
+                lines.push(`  ${label}`);
               }
-              invalidate();
-              tui.requestRender();
-              return;
-            }
+            });
+          }
 
-            // ── Main screen ──
-            const items = getItems();
-            clampMain();
+          if (paidItems.length > 0) {
+            lines.push("");
+            lines.push(theme.fg("dim", "  ─ Paid (fallback) ─"));
+            paidItems.forEach(it => {
+              const globalIdx = items.indexOf(it);
+              if (globalIdx === cursor) cursorLine = lines.length;
+              const selected = globalIdx === cursor && !moveMode;
+              const moving = globalIdx === cursor && moveMode;
+              const prefix = moving ? theme.fg("accent", " ◉") : selected ? theme.fg("accent", " ○") : "  ";
+              const label = ` ${prefix} #${globalIdx + 1} ${it.entry}`;
+              if (moving) {
+                lines.push(theme.style(`  ${label}  [↑↓] move  [Space] done  [d] remove`, {fg: "accent", bold: true}));
+              } else {
+                lines.push(`  ${label}`);
+              }
+            });
+          }
 
-            if (data === "\r" || data === "\n") {
-              config.free = free;
-              config.paid = paid;
-              done(null);
-              return;
-            }
+          lines.push("");
+          lines.push(theme.fg("dim", "  [↑↓] move  [Space] toggle move  [p] free/paid  [d] delete  [Tab] add  [Enter] done"));
 
-            if (data === " " && items.length > 0) {
-              moveMode = !moveMode;
-              invalidate();
-              tui.requestRender();
-              return;
-            }
+          if (cursorLine >= 0) {
+            if (cursorLine < mainScrollTop) mainScrollTop = cursorLine;
+            if (cursorLine >= mainScrollTop + VIEWPORT) mainScrollTop = cursorLine - VIEWPORT + 1;
+          }
 
-            if (data === "\t") {
-              screen = "add";
-              addCursor = 0;
-              addScrollTop = 0;
+          const visible = lines.slice(mainScrollTop, mainScrollTop + VIEWPORT);
+          return visible.map(l => truncate(l, width));
+        }
+
+        function render(width) {
+          if (cachedLines && cachedWidth === width) return cachedLines;
+          cachedWidth = width;
+          cachedLines = screen === "add" ? renderAdd(width) : renderMain(width);
+          return cachedLines;
+        }
+
+        function invalidate() { cachedWidth = undefined; cachedLines = undefined; }
+
+        function handleInput(data) {
+          if (screen === "add") {
+            clampAdd();
+
+            if (keybindings.matches(data, "tui.select.up")) {
+              if (addCursor > 0) addCursor--;
+            } else if (keybindings.matches(data, "tui.select.down")) {
+              if (addCursor < allModels.length - 1) addCursor++;
+            } else if (keybindings.matches(data, "tui.select.cancel")) {
+              screen = "main";
               moveMode = false;
               invalidate();
               tui.requestRender();
               return;
-            }
-
-            const isUp = keybindings.matches(data, "tui.select.up");
-            const isDown = keybindings.matches(data, "tui.select.down");
-
-            if (isUp && cursor > 0) {
-              if (moveMode) {
-                const cur = items[cursor];
-                const tgt = items[cursor - 1];
-                if (cur.section === tgt.section) {
-                  const arr = cur.section === "free" ? free : paid;
-                  const ci = arr.indexOf(cur.entry);
-                  const ti = arr.indexOf(tgt.entry);
-                  if (ci >= 0 && ti >= 0) { [arr[ci], arr[ti]] = [arr[ti], arr[ci]]; cursor--; }
-                }
-              } else {
-                cursor--;
-              }
+            } else if (data === "\r" || data === "\n") {
+              screen = "main";
+              moveMode = false;
               invalidate();
               tui.requestRender();
               return;
-            }
-
-            if (isDown && cursor < items.length - 1) {
-              if (moveMode) {
-                const cur = items[cursor];
-                const tgt = items[cursor + 1];
-                if (cur.section === tgt.section) {
-                  const arr = cur.section === "free" ? free : paid;
-                  const ci = arr.indexOf(cur.entry);
-                  const ti = arr.indexOf(tgt.entry);
-                  if (ci >= 0 && ti >= 0) { [arr[ci], arr[ti]] = [arr[ti], arr[ci]]; cursor++; }
-                }
-              } else {
-                cursor++;
-              }
+            } else if (data === "\t") {
+              screen = "main";
+              moveMode = false;
               invalidate();
               tui.requestRender();
               return;
-            }
-
-            if (data === "d" || data === "D") {
-              if (cursor < items.length) {
-                const entry = items[cursor].entry;
-                const fi = free.indexOf(entry);
-                if (fi >= 0) free.splice(fi, 1);
-                const pi = paid.indexOf(entry);
-                if (pi >= 0) paid.splice(pi, 1);
-                moveMode = false;
-                if (cursor >= items.length - 1 && cursor > 0) cursor--;
-                invalidate();
-                tui.requestRender();
-              }
-              return;
-            }
-
-            if (data === "p" || data === "P") {
-              if (cursor < items.length) {
-                const entry = items[cursor].entry;
-                const fi = free.indexOf(entry);
+            } else if (data === " ") {
+              const m = allModels[addCursor];
+              if (m) {
+                const key = `${m.provider}/${m.id}`;
+                const fi = free.indexOf(key);
+                const pi = paid.indexOf(key);
                 if (fi >= 0) {
                   free.splice(fi, 1);
-                  paid.push(entry);
+                } else if (pi >= 0) {
+                  paid.splice(pi, 1);
                 } else {
-                  const pi = paid.indexOf(entry);
-                  if (pi >= 0) { paid.splice(pi, 1); free.push(entry); }
+                  free.push(key);
                 }
-                moveMode = false;
-                invalidate();
-                tui.requestRender();
               }
+            } else {
               return;
             }
+            invalidate();
+            tui.requestRender();
+            return;
           }
 
-          return { render, invalidate, handleInput };
-        });
+          const items = getItems();
+          clampMain();
 
-        const total = config.free.length + config.paid.length;
-        ctx.ui.notify(`Models: ${config.free.length} free + ${config.paid.length} paid = ${total} active`, "info");
-        return;
+          if (data === "\r" || data === "\n") {
+            config.free = free;
+            config.paid = paid;
+            done(null);
+            return;
+          }
+
+          if (data === " " && items.length > 0) {
+            moveMode = !moveMode;
+            invalidate();
+            tui.requestRender();
+            return;
+          }
+
+          if (data === "\t") {
+            screen = "add";
+            addCursor = 0;
+            addScrollTop = 0;
+            moveMode = false;
+            invalidate();
+            tui.requestRender();
+            return;
+          }
+
+          const isUp = keybindings.matches(data, "tui.select.up");
+          const isDown = keybindings.matches(data, "tui.select.down");
+
+          if (isUp && cursor > 0) {
+            if (moveMode) {
+              const cur = items[cursor];
+              const tgt = items[cursor - 1];
+              if (cur.section === tgt.section) {
+                const arr = cur.section === "free" ? free : paid;
+                const ci = arr.indexOf(cur.entry);
+                const ti = arr.indexOf(tgt.entry);
+                if (ci >= 0 && ti >= 0) { [arr[ci], arr[ti]] = [arr[ti], arr[ci]]; cursor--; }
+              }
+            } else {
+              cursor--;
+            }
+            invalidate();
+            tui.requestRender();
+            return;
+          }
+
+          if (isDown && cursor < items.length - 1) {
+            if (moveMode) {
+              const cur = items[cursor];
+              const tgt = items[cursor + 1];
+              if (cur.section === tgt.section) {
+                const arr = cur.section === "free" ? free : paid;
+                const ci = arr.indexOf(cur.entry);
+                const ti = arr.indexOf(tgt.entry);
+                if (ci >= 0 && ti >= 0) { [arr[ci], arr[ti]] = [arr[ti], arr[ci]]; cursor++; }
+              }
+            } else {
+              cursor++;
+            }
+            invalidate();
+            tui.requestRender();
+            return;
+          }
+
+          if (data === "d" || data === "D") {
+            if (cursor < items.length) {
+              const entry = items[cursor].entry;
+              const fi = free.indexOf(entry);
+              if (fi >= 0) free.splice(fi, 1);
+              const pi = paid.indexOf(entry);
+              if (pi >= 0) paid.splice(pi, 1);
+              moveMode = false;
+              if (cursor >= items.length - 1 && cursor > 0) cursor--;
+              invalidate();
+              tui.requestRender();
+            }
+            return;
+          }
+
+          if (data === "p" || data === "P") {
+            if (cursor < items.length) {
+              const entry = items[cursor].entry;
+              const fi = free.indexOf(entry);
+              if (fi >= 0) {
+                free.splice(fi, 1);
+                paid.push(entry);
+              } else {
+                const pi = paid.indexOf(entry);
+                if (pi >= 0) { paid.splice(pi, 1); free.push(entry); }
+              }
+              moveMode = false;
+              invalidate();
+              tui.requestRender();
+            }
+            return;
+          }
+        }
+
+        return { render, invalidate, handleInput };
+      });
+
+      const total = config.free.length + config.paid.length;
+      ctx.ui.notify(`Models: ${config.free.length} free + ${config.paid.length} paid = ${total} active`, "info");
+    },
+  });
+
+  pi.registerCommand("freemium-list", {
+    description: "Show current free and paid model chains",
+    handler: async (_args, ctx) => {
+      migrateConfig(ctx.modelRegistry);
+      ctx.ui.notify(
+        `Free:  ${config.free.join(" → ")}\nPaid:  ${config.paid.join(" → ")}`,
+        "info"
+      );
+    },
+  });
+
+  pi.registerCommand("freemium-status", {
+    description: "Alias for /freemium-list — show current model chains",
+    handler: async (_args, ctx) => {
+      migrateConfig(ctx.modelRegistry);
+      ctx.ui.notify(
+        `Free:  ${config.free.join(" → ")}\nPaid:  ${config.paid.join(" → ")}`,
+        "info"
+      );
+    },
+  });
+
+  // Legacy catch-all dispatcher for backward compatibility
+  pi.registerCommand("freemium", {
+    description: "Obsolete — use /freemium-configure, /freemium-optimize, /freemium-list",
+    handler: async (args, ctx) => {
+      const subcmd = args.trim().split(/\s+/)[0];
+      if (subcmd === "configure" || subcmd === "") {
+        ctx.ui.notify("Use /freemium-configure instead", "warning");
+      } else if (subcmd === "optimize") {
+        ctx.ui.notify("Use /freemium-optimize instead", "warning");
+      } else if (subcmd === "list" || subcmd === "status") {
+        ctx.ui.notify("Use /freemium-list instead", "warning");
+      } else {
+        showUsage(ctx);
       }
-
-      if (subcmd === "list" || subcmd === "status") {
-        ctx.ui.notify(
-          `Free:  ${config.free.join(" → ")}\nPaid:  ${config.paid.join(" → ")}`,
-          "info"
-        );
-        return;
-      }
-
-      ctx.ui.notify("Usage: /freemium {configure|optimize|list|status}", "info");
     },
   });
 
@@ -539,7 +568,6 @@ export default function (pi) {
     return null;
   }
 
-  // ── Virtual model: freemium/penny-pincher ──────────────────────
   pi.registerVirtualModel({
     provider: "freemium",
     id: "penny-pincher",
@@ -554,7 +582,6 @@ export default function (pi) {
       const level = request.thinkingLevel;
       const isLow = level === "off" || level === "low";
 
-      // ── Retry / failure: check gateway before switching ───────
       if ((request.reason === "retry" || request.reason === "continuation") && request.failed) {
         const failedModelId = request.failed.model?.id || request.previous?.model?.id;
         const gw = pingGateway(config.gatewayIp);
@@ -584,13 +611,11 @@ export default function (pi) {
         return { model: request.previous?.model, thinkingLevel: level, state: { gateway: { ip: config.gatewayIp, status: "online" } } };
       }
 
-      // ── Continuation: sticky ─────────────────────────────────
       const sticky = request.failed ?? request.previous;
       if (request.reason !== "user" && sticky) {
         return { model: sticky.model, thinkingLevel: sticky.thinkingLevel ?? "medium" };
       }
 
-      // ── Fresh user messages: free first, then paid ────────────
       for (const entry of config.free) {
         const m = resolveEntry(ctx.modelRegistry, entry);
         if (m) {
@@ -601,7 +626,6 @@ export default function (pi) {
         }
       }
 
-      // All free exhausted → try paid
       for (const entry of config.paid) {
         const m = resolveEntry(ctx.modelRegistry, entry);
         if (m) {
