@@ -246,6 +246,45 @@ export default function (pi) {
               return;
             }
 
+            const isUp = keybindings.matches(data, "tui.select.up") || data === "u";
+            const isDown = keybindings.matches(data, "tui.select.down") || data === "d";
+
+            if (isUp && cursor > 0) {
+              if (moveMode) {
+                const cur = items[cursor];
+                const tgt = items[cursor - 1];
+                if (cur.section === tgt.section) {
+                  const arr = cur.section === "free" ? free : paid;
+                  const ci = arr.indexOf(cur.id);
+                  const ti = arr.indexOf(tgt.id);
+                  if (ci >= 0 && ti >= 0) { [arr[ci], arr[ti]] = [arr[ti], arr[ci]]; cursor--; }
+                }
+              } else {
+                cursor--;
+              }
+              invalidate();
+              tui.requestRender();
+              return;
+            }
+
+            if (isDown && cursor < items.length - 1) {
+              if (moveMode) {
+                const cur = items[cursor];
+                const tgt = items[cursor + 1];
+                if (cur.section === tgt.section) {
+                  const arr = cur.section === "free" ? free : paid;
+                  const ci = arr.indexOf(cur.id);
+                  const ti = arr.indexOf(tgt.id);
+                  if (ci >= 0 && ti >= 0) { [arr[ci], arr[ti]] = [arr[ti], arr[ci]]; cursor++; }
+                }
+              } else {
+                cursor++;
+              }
+              invalidate();
+              tui.requestRender();
+              return;
+            }
+
             if (data === "d" || data === "D") {
               if (cursor < items.length) {
                 const pid = items[cursor].id;
@@ -254,7 +293,7 @@ export default function (pi) {
                 const pi = paid.indexOf(pid);
                 if (pi >= 0) paid.splice(pi, 1);
                 moveMode = false;
-                if (cursor >= free.length + paid.length && cursor > 0) cursor--;
+                if (cursor >= items.length - 1 && cursor > 0) cursor--;
                 invalidate();
                 tui.requestRender();
               }
@@ -270,10 +309,7 @@ export default function (pi) {
                   paid.push(pid);
                 } else {
                   const pi = paid.indexOf(pid);
-                  if (pi >= 0) {
-                    paid.splice(pi, 1);
-                    free.push(pid);
-                  }
+                  if (pi >= 0) { paid.splice(pi, 1); free.push(pid); }
                 }
                 moveMode = false;
                 invalidate();
@@ -281,45 +317,7 @@ export default function (pi) {
               }
               return;
             }
-
-            if (moveMode && items.length > 1) {
-              const isUp = keybindings.matches(data, "tui.select.up") || data === "u";
-              const isDown = keybindings.matches(data, "tui.select.down");
-              const cur = items[cursor];
-
-              if (isUp && cursor > 0) {
-                const tgt = items[cursor - 1];
-                if (cur.section === tgt.section) {
-                  const arr = cur.section === "free" ? free : paid;
-                  const ci = arr.indexOf(cur.id);
-                  const ti = arr.indexOf(tgt.id);
-                  if (ci >= 0 && ti >= 0) {
-                    [arr[ci], arr[ti]] = [arr[ti], arr[ci]];
-                    cursor--;
-                    invalidate();
-                    tui.requestRender();
-                  }
-                }
-                return;
-              }
-              if (isDown && cursor < items.length - 1) {
-                const tgt = items[cursor + 1];
-                if (cur.section === tgt.section) {
-                  const arr = cur.section === "free" ? free : paid;
-                  const ci = arr.indexOf(cur.id);
-                  const ti = arr.indexOf(tgt.id);
-                  if (ci >= 0 && ti >= 0) {
-                    [arr[ci], arr[ti]] = [arr[ti], arr[ci]];
-                    cursor++;
-                    invalidate();
-                    tui.requestRender();
-                  }
-                }
-                return;
-              }
-            }
           }
-
           return { render, invalidate, handleInput };
         });
 
