@@ -101,7 +101,16 @@ export default function (pi) {
           return;
         }
 
-        // Use custom TUI for configure — includes add from catalog via 'a'
+        // Build catalog from all global Pi providers
+        let providerCatalog = [];
+        try {
+          const allProviders = ctx.modelRegistry.getProviders?.() ?? [];
+          providerCatalog = allProviders.map(p => ({ id: p.id, name: p.name })).sort((a, b) => a.name.localeCompare(b.name));
+        } catch (_) {
+          providerCatalog = DEFAULT_PROVIDERS.slice();
+        }
+
+        // Use custom TUI for configure — includes add from catalog via Tab
         await ctx.ui.custom((tui, theme, keybindings, done) => {
           let free = [...config.free];
           let paid = [...config.paid];
@@ -112,7 +121,7 @@ export default function (pi) {
           let cachedWidth = undefined;
           let cachedLines = undefined;
 
-          const catalog = DEFAULT_PROVIDERS.slice().sort((a, b) => a.name.localeCompare(b.name));
+          const catalog = providerCatalog;
 
           function getListItems() {
             const result = [];
