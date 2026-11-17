@@ -138,20 +138,19 @@ export default function (pi) {
 
             if (screen === "add") {
               clampAdd();
-              lines.push(theme.style("  Add Provider to Router", { fg: "accent", bold: true }));
+              lines.push("  Add Provider to Router");
               lines.push("");
               const active = new Set([...free, ...paid]);
               for (let i = 0; i < catalog.length; i++) {
                 const p = catalog[i];
                 const isActive = active.has(p.id);
                 const sel = i === addCursor;
+                const mark = isActive ? " ✓" : "";
                 const prefix = sel ? "> " : "  ";
-                const mark = isActive ? theme.fg("success", " ✓") : "";
-                const row = `  ${prefix}${p.name}${mark}`;
-                lines.push(sel ? theme.fg("accent", row) : row);
+                lines.push(`  ${prefix}${p.name}${mark}`);
               }
               lines.push("");
-              lines.push(theme.fg("dim", "  [Enter] add  [Esc/Tab] back"));
+              lines.push("  [Enter] add  [Esc/Tab] back");
             } else {
               clampMain();
               const items = getListItems();
