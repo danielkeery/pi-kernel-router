@@ -116,7 +116,7 @@ export default function (pi) {
         );
         if (ok) {
           config.free = suggested;
-          ctx.ui.notify(`Applied: ${proposed}", "info");
+          ctx.ui.notify(`Applied: ${proposed}`, "info");
         }
         return;
       }
