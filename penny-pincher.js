@@ -162,7 +162,7 @@ function getFailedEntryIndex(failedModel) {
   return -1;
 }
 
-const KEY_STYLE = { fg: "white", bold: true };
+const KEY_STYLE = { fg: "accent", bold: true };
 const VIEWPORT = 16;
 
 function renderHelpBar(theme, items) {
