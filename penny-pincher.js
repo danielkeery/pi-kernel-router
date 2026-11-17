@@ -1,5 +1,4 @@
-// Kernel Project Virtual Model Router
-// Free-first (all providers) + Radium fallback chain + gateway network check + rate-limit handling
+// Freemium Penny-Pincher — Free-First AI Model Router + Radium fallback via freemium provider
 //
 // Gateway check: when a request fails, pings the configured gateway.
 //   - Gateway unreachable → stay on the SAME model (retry loop, don't switch)
@@ -46,9 +45,47 @@ function getFailedProvider(failedModelId) {
 const FALLBACK_TIERS = ["google", "amd-tokenlab", "cline", "groq", "kilo", "xkiro", "requesty", "tycho", "clarke", "hal"];
 
 export default function (pi) {
+  // ── Register the freemium provider (Radium models under freemium name) ──
+  pi.registerProvider("freemium", {
+    name: "Freemium (Radium fallback)",
+    baseUrl: "https://api.radium.cloud/v1",
+    api: "openai-completions",
+    apiKey: "$FREEMIUM_API_KEY",
+    authHeader: true,
+    models: [
+      {
+        id: "hal-1.0",
+        name: "Freemium Hal 1.0 (Heavy Reasoning & Complex Code)",
+        reasoning: true,
+        input: ["text", "image"],
+        cost: { input: 2.0, output: 10.0, cacheRead: 0.2, cacheWrite: 0 },
+        contextWindow: 128000,
+        maxTokens: 32768
+      },
+      {
+        id: "clarke-1.0",
+        name: "Freemium Clarke 1.0 (Balanced Coding & Tool Calls)",
+        reasoning: true,
+        input: ["text", "image"],
+        cost: { input: 0.75, output: 4.5, cacheRead: 0.075, cacheWrite: 0 },
+        contextWindow: 200000,
+        maxTokens: 16384
+      },
+      {
+        id: "tycho-1.0",
+        name: "Freemium Tycho 1.0 (Fast Extraction & Classification)",
+        reasoning: false,
+        input: ["text"],
+        cost: { input: 0.1, output: 1.5, cacheRead: 0.02, cacheWrite: 0 },
+        contextWindow: 128000,
+        maxTokens: 8192
+      }
+    ]
+  });
+
   // ── Slash command: /set-router-gateway ─────────────────────────────
   pi.registerCommand("set-router-gateway", {
-    description: "Set the gateway IP used by the kernel router for network-liveness checks. Ping result tells the router whether to retry (offline) or fall back (online).",
+    description: "Set the gateway IP used by the penny-pincher router for network-liveness checks. Ping result tells the router whether to retry (offline) or fall back (online).",
     handler: async (args, ctx) => {
       const ip = args.trim();
       if (!ip) {
@@ -73,20 +110,20 @@ export default function (pi) {
     return ctx.modelRegistry.find(provider, id);
   }
 
-  function getRadiumModel(ctx, tier, level) {
+  function getFreemiumModel(ctx, tier, level) {
     const isLow = level === "off" || level === "low";
     const isHigh = level === "high" || level === "xhigh" || level === "max";
     if (tier === "tycho") {
-      return { model: find(ctx, "radium", "tycho-1.0"), thinkingLevel: "off" };
+      return { model: find(ctx, "freemium", "tycho-1.0"), thinkingLevel: "off" };
     }
     if (tier === "clarke") {
       return {
-        model: find(ctx, "radium", "clarke-1.0"),
+        model: find(ctx, "freemium", "clarke-1.0"),
         thinkingLevel: isLow ? "off" : isHigh ? "high" : "medium"
       };
     }
     if (tier === "hal") {
-      return { model: find(ctx, "radium", "hal-1.0"), thinkingLevel: isLow ? "low" : level };
+      return { model: find(ctx, "freemium", "hal-1.0"), thinkingLevel: isLow ? "low" : level };
     }
     return null;
   }
@@ -124,21 +161,21 @@ export default function (pi) {
     }
 
     for (let i = Math.max(idx + 1, FALLBACK_TIERS.indexOf("tycho")); i < FALLBACK_TIERS.length; i++) {
-      const r = getRadiumModel(ctx, FALLBACK_TIERS[i], level);
+      const r = getFreemiumModel(ctx, FALLBACK_TIERS[i], level);
       if (r?.model) return r;
     }
 
     return {
-      model: find(ctx, "radium", "hal-1.0") || find(ctx, "radium", "clarke-1.0"),
+      model: find(ctx, "freemium", "hal-1.0") || find(ctx, "freemium", "clarke-1.0"),
       thinkingLevel: level
     };
   }
 
-  // ── Virtual model ──────────────────────────────────────────────────
+  // ── Virtual model: freemium/penny-pincher ──────────────────────────
   pi.registerVirtualModel({
-    provider: "radium",
-    id: "optomizer",
-    name: "Optomizer (free-first + fallback)",
+    provider: "freemium",
+    id: "penny-pincher",
+    name: "Penny-Pincher (free-first + fallback)",
     thinkingLevels: ["off", "low", "medium", "high", "xhigh", "max"],
     contextWindow: 200000,
     maxTokens: 32768,
@@ -171,8 +208,8 @@ export default function (pi) {
 
         // ── NETWORK UP: real model failure → escalate ──────────────
         if (isContextOverflow(request.failed)) {
-          const target = find(ctx, "radium", "clarke-1.0")
-            || find(ctx, "radium", "hal-1.0");
+          const target = find(ctx, "freemium", "clarke-1.0")
+            || find(ctx, "freemium", "hal-1.0");
           if (target) return {
             model: target,
             thinkingLevel: "medium",
@@ -189,7 +226,7 @@ export default function (pi) {
         };
 
         return {
-          model: find(ctx, "radium", "hal-1.0") || find(ctx, "radium", "clarke-1.0"),
+          model: find(ctx, "freemium", "hal-1.0") || find(ctx, "freemium", "clarke-1.0"),
           thinkingLevel: level,
           state: { gateway: { ip: config.gatewayIp, status: "online" } }
         };
@@ -256,20 +293,20 @@ export default function (pi) {
 
       if (isLow) {
         return {
-          model: find(ctx, "radium", "tycho-1.0") || find(ctx, "radium", "clarke-1.0"),
+          model: find(ctx, "freemium", "tycho-1.0") || find(ctx, "freemium", "clarke-1.0"),
           thinkingLevel: "off"
         };
       }
 
       if (level === "medium") {
         return {
-          model: find(ctx, "radium", "clarke-1.0") || find(ctx, "radium", "hal-1.0"),
+          model: find(ctx, "freemium", "clarke-1.0") || find(ctx, "freemium", "hal-1.0"),
           thinkingLevel: "medium"
         };
       }
 
       return {
-        model: find(ctx, "radium", "hal-1.0") || find(ctx, "radium", "clarke-1.0"),
+        model: find(ctx, "freemium", "hal-1.0") || find(ctx, "freemium", "clarke-1.0"),
         thinkingLevel: level
       };
     }

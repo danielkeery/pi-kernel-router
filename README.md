@@ -1,10 +1,13 @@
-# Pi Kernel Router — Free-First AI Model Router for Pi Agent
+# Pi Penny-Pincher — Free-First AI Model Router for Pi Agent
 
-A [Pi Coding Agent](https://pi.dev) virtual model router that automatically routes requests across 7+ free AI providers with a configurable fallback chain to paid Radium models. Optimized for kernel reverse-engineering and embedded Linux development.
+A [Pi Coding Agent](https://pi.dev) virtual model router that auto-registers the **freemium** provider (Radium API) and routes requests across 7 free AI providers with a configurable fallback chain.
+
+**Model: `freemium/penny-pincher`**
 
 ## Features
 
-- **Free-first routing** — Tries Google Gemini → AMD TokenLab → Cline → Groq → Kilo → Xkiro → Requesty before touching paid models
+- **Free-first routing** — Google Gemini → AMD TokenLab → Cline → Groq → Kilo → Xkiro → Requesty before touching paid models
+- **Self-registering provider** — Registers the `freemium` provider on install, no manual models.json edits needed
 - **Four-tier fallback chain** — Free models → Tycho ($0.10/$1.50) → Clarke ($0.75/$4.50) → Hal ($2.00/$10.00)
 - **Network gateway detection** — Pings a configurable gateway IP on failure. Gateway unreachable = stay on same model (retry loop). Gateway reachable = real failure → escalate
 - **Rate-limit handling** — 429/402/context-overflow detection routes around exhausted quotas
@@ -15,58 +18,32 @@ A [Pi Coding Agent](https://pi.dev) virtual model router that automatically rout
 
 | File | Purpose |
 |------|---------|
-| `optomizer.js` | Pi virtual model router extension |
+| `penny-pincher.js` | Pi virtual model router extension |
 | `settings.json` | Pi project settings template |
-
-## Requirements
-
-- [Pi Coding Agent](https://pi.dev) >= 0.86.0
-- [pi-free](https://github.com/apmantza/pi-free) extension (for Cline, Kilo, AMD TokenLab, Xkiro, Requesty providers)
-- API keys for desired free providers (see [pi-free docs](https://github.com/apmantza/pi-free))
 
 ## Setup
 
 ```bash
-# 1. Clone and install pi-free
-pi install npm:pi-free
+# 1. Set your freemium/Radium API key
+export FREEMIUM_API_KEY="sk_..."
 
-# 2. Set free provider API keys
-export GROQ_API_KEY="gsk_..."
-export AMD_TOKENLAB_API_KEY="tl_..."
-export CLINE_API_KEY="..."
-export KILO_API_KEY="..."
-export XKIRO_API_KEY="sk-xt-..."
-export REQUESTY_API_KEY="..."
-
-# 3. Add to your project's settings.json
+# 2. Add to your project's .pi/settings.json:
 ```
 
 ### Project .pi/settings.json
 
 ```json
 {
-  "defaultModel": "radium/kernel-auto",
-  "extensions": [".pi/extensions/optomizer.js"]
+  "defaultModel": "freemium/penny-pincher",
+  "extensions": [".pi/extensions/penny-pincher.js"]
 }
 ```
 
 ### Usage
 
-Select the virtual model:
-
 ```text
-/model radium/kernel-auto
-```
-
-Set the gateway for network-liveness checks:
-
-```text
+/model freemium/penny-pincher
 /set-router-gateway 192.168.43.100
-```
-
-Adjust thinking level to switch modes:
-
-```text
 /thinking low    # → Fast free model → Tycho for build tasks
 /thinking medium # → Balanced free → Clarke for coding
 /thinking high   # → Best free → Hal for RE analysis
