@@ -144,10 +144,11 @@ export default function (pi) {
               for (let i = 0; i < catalog.length; i++) {
                 const p = catalog[i];
                 const isActive = active.has(p.id);
-                const arrow = i === addCursor ? theme.fg("accent", " →") : "  ";
-                const mark = isActive ? theme.fg("success", " ✓") : "   ";
-                const label = `${arrow} ${p.name}${mark}`;
-                lines.push(i === addCursor ? theme.style(`  ${label}`, {fg: "accent", bold: true}) : `  ${label}`);
+                const sel = i === addCursor;
+                const prefix = sel ? theme.fg("accent", "> ") : "  ";
+                const mark = isActive ? theme.fg("success", " ✓") : "";
+                const name = sel ? theme.style(p.name, { fg: "accent", bold: true }) : p.name;
+                lines.push(`  ${prefix}${name}${mark}`);
               }
               lines.push("");
               lines.push(theme.fg("dim", "  [Enter] add  [Esc/Tab] back"));
