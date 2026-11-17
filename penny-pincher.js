@@ -116,7 +116,7 @@ export default function (pi) {
         );
         if (ok) {
           config.free = suggested;
-          ctx.ui.notify(`Applied: ${proposed}`, "info");
+          ctx.ui.notify(`Applied: ${proposed}", "info");
         }
         return;
       }
@@ -127,26 +127,51 @@ export default function (pi) {
           return;
         }
 
+        const providerCatalog = DEFAULT_PROVIDERS.slice();
+
+        // Pick which providers to add via ctx.ui.select
+        const chosen = await ctx.ui.select(
+          "Pick providers to add (Space to select, Enter to confirm)",
+          providerCatalog.map(p => ({
+            value: p.id,
+            label: `${p.name}${config.free.includes(p.id) || config.paid.includes(p.id) ? " ✓" : ""}`
+          })),
+          { multiple: true }
+        );
+
+        if (chosen && chosen.length > 0) {
+          // Split chosen into free (if not already paid) and paid
+          for (const pid of chosen) {
+            if (!config.free.includes(pid) && !config.paid.includes(pid)) {
+              config.free.push(pid);
+            }
+          }
+        }
+
+        // Now configure order via TUI
         await ctx.ui.custom((tui, theme, keybindings, done) => {
-          let free = [...config.free];
-          let paid = [...config.paid];
-          let view = "configured"; // "configured" | "all"
+          let free = [...config.free].filter(id => {
+            const def = DEFAULT_PROVIDERS.find(p => p.id === id) || true;
+            return def;
+          });
+          let paid = [...config.paid].filter(id => {
+            const def = DEFAULT_PROVIDERS.find(p => p.id === id) || true;
+            return def;
+          });
           let cursor = 0;
-          let moveMode = false;    // true = selected item will respond to up/down
+          let moveMode = false;
           let cachedWidth = undefined;
           let cachedLines = undefined;
 
-          // ── Discover all providers from the model registry ──
-          function getAllRegistryProviders() {
-            const known = new Map();
-            // Start with defaults so we get nice names
-            for (const p of DEFAULT_PROVIDERS) known.set(p.id, p);
-            // Add any provider the registry knows (has at least one model)
-            return Array.from(known.values()).sort((a, b) => a.name.localeCompare(b.name));
+          function getAllItems() {
+            const result = [];
+            for (let i = 0; i < free.length; i++) result.push({ id: free[i], section: "free" });
+            for (let i = 0; i < paid.length; i++)  result.push({ id: paid[i], section: "paid" });
+            return result;
           }
 
           function clamp() {
-            const count = view === "configured" ? free.length + paid.length : getAllRegistryProviders().length;
+            const count = free.length + paid.length;
             if (count === 0) cursor = 0;
             else cursor = Math.max(0, Math.min(cursor, count - 1));
           }
@@ -155,64 +180,47 @@ export default function (pi) {
             if (cachedLines && cachedWidth === width) return cachedLines;
             cachedWidth = width;
             const lines = [];
+            const items = getAllItems();
+            clamp();
 
-            if (view === "configured") {
-              // ── Configured providers view ──
-              lines.push(theme.style("  Freemium Penny-Pincher — Configured Providers", { fg: "accent", bold: true }));
-              lines.push("");
+            lines.push(theme.style("  Freemium Penny-Pincher — Configured Providers", { fg: "accent", bold: true }));
+            lines.push("");
 
-              const allEntries = [];
-              for (let i = 0; i < free.length; i++) allEntries.push({ id: free[i], section: "free", idx: i });
-              for (let i = 0; i < paid.length; i++)  allEntries.push({ id: paid[i], section: "paid", idx: i });
+            if (items.length === 0) {
+              lines.push(theme.fg("dim", "  No providers configured"));
+            } else {
+              const freeItems = free.map((id, i) => ({ id, section: "free", idx: i }));
+              const paidItems = paid.map((id, i) => ({ id, section: "paid", idx: i }));
 
-              clamp();
-
-              if (allEntries.length === 0) {
-                lines.push(theme.fg("dim", "  No providers configured — press Tab to browse all"));
-              } else {
-                // ── Free section ──
+              if (freeItems.length > 0) {
                 lines.push(theme.fg("dim", "  ─ Free (tried first) ─"));
-                for (const entry of allEntries) {
-                  const isFree = entry.section === "free";
+                for (const entry of freeItems) {
                   const p = getProvDef(entry.id);
-                  const selected = cursor === allEntries.indexOf(entry) && !moveMode;
-                  const moving = cursor === allEntries.indexOf(entry) && moveMode;
+                  const idx2 = items.indexOf(entry);
+                  const selected = idx2 === cursor && !moveMode;
+                  const moving = idx2 === cursor && moveMode;
                   const prefix = moving ? theme.fg("accent", " ◉") : selected ? theme.fg("accent", " ○") : "  ";
-                  const label = ` ${prefix} #${allEntries.indexOf(entry) + 1} ${p.name}`;
+                  const label = ` ${prefix} #${items.indexOf(entry) + 1} ${p.name}`;
                   lines.push(moving ? theme.bg("highlight", `  ${label}  [↑↓] move  [Space] done  [d] remove`) : `  ${label}`);
                 }
-
-                // ── Paid section ──
-                if (paid.length > 0) {
-                  lines.push("");
-                  lines.push(theme.fg("dim", "  ─ Paid (fallback) ─"));
-                  // Paid entries already shown in allEntries list above
+              }
+              if (paidItems.length > 0) {
+                lines.push("");
+                lines.push(theme.fg("dim", "  ─ Paid (fallback) ─"));
+                for (const entry of paidItems) {
+                  const p = getProvDef(entry.id);
+                  const idx2 = items.indexOf(entry);
+                  const selected = idx2 === cursor && !moveMode;
+                  const moving = idx2 === cursor && moveMode;
+                  const prefix = moving ? theme.fg("accent", " ◉") : selected ? theme.fg("accent", " ○") : "  ";
+                  const label = ` ${prefix} #${items.indexOf(entry) + 1} ${p.name}`;
+                  lines.push(moving ? theme.bg("highlight", `  ${label}  [↑↓] move  [Space] done  [d] remove`) : `  ${label}`);
                 }
               }
-
-              lines.push("");
-              lines.push(theme.fg("dim", "  [Tab] browse all  [Space] select to move  [↑↓] move  [p] toggle paid  [d] delete  [Enter] done"));
-            } else {
-              // ── All providers view ──
-              const catalog = getAllRegistryProviders();
-              clamp();
-
-              lines.push(theme.style("  Freemium Penny-Pincher — All Available Providers", { fg: "accent", bold: true }));
-              lines.push("");
-
-              for (let i = 0; i < catalog.length; i++) {
-                const p = catalog[i];
-                const inFree = free.includes(p.id);
-                const inPaid = paid.includes(p.id);
-                const tag = inPaid ? theme.fg("warning", " p") : inFree ? theme.fg("success", " f") : "  ";
-                const arrow = i === cursor ? theme.fg("accent", " →") : "  ";
-                const label = `${arrow} ${p.name.padEnd(30)}${tag}`;
-                lines.push(i === cursor ? theme.bg("highlight", `  ${label}`) : `  ${label}`);
-              }
-
-              lines.push("");
-              lines.push(theme.fg("dim", "  [a] add to router  [Tab/Enter] back  [↑↓] browse"));
             }
+
+            lines.push("");
+            lines.push(theme.fg("dim", "  [Space] select to move  [↑↓] move  [p] toggle paid  [d] delete  [Enter] done"));
 
             cachedLines = lines.map(l => l.length > width ? l.slice(0, width) : l);
             return cachedLines;
@@ -221,44 +229,8 @@ export default function (pi) {
           function invalidate() { cachedWidth = undefined; cachedLines = undefined; }
 
           function handleInput(data) {
-            if (view === "all") {
-              const catalog = getAllRegistryProviders();
-              clamp();
-
-              if (keybindings.matches(data, "tui.select.up") || data === "u") {
-                if (cursor > 0) cursor--;
-              } else if (keybindings.matches(data, "tui.select.down") || data === "d") {
-                if (cursor < catalog.length - 1) cursor++;
-              } else if (data === "a" || data === "A") {
-                const pid = catalog[cursor].id;
-                if (!free.includes(pid) && !paid.includes(pid)) {
-                  free.push(pid);
-                }
-              } else if (data === "\t" || data === "\r" || data === "\n") {
-                view = "configured";
-                moveMode = false;
-              } else {
-                return;
-              }
-              invalidate();
-              tui.requestRender();
-              return;
-            }
-
-            // ── Configured view ──
-            const allEntries = [];
-            for (let i = 0; i < free.length; i++) allEntries.push({ id: free[i], section: "free" });
-            for (let i = 0; i < paid.length; i++)  allEntries.push({ id: paid[i], section: "paid" });
+            const items = getAllItems();
             clamp();
-
-            if (data === "\t") {
-              view = "all";
-              cursor = 0;
-              moveMode = false;
-              invalidate();
-              tui.requestRender();
-              return;
-            }
 
             if (data === "\r" || data === "\n") {
               config.free = free;
@@ -267,9 +239,16 @@ export default function (pi) {
               return;
             }
 
+            if (data === " " && items.length > 0) {
+              moveMode = !moveMode;
+              invalidate();
+              tui.requestRender();
+              return;
+            }
+
             if (data === "d" || data === "D") {
-              if (cursor < allEntries.length) {
-                const pid = allEntries[cursor].id;
+              if (cursor < items.length) {
+                const pid = items[cursor].id;
                 const fi = free.indexOf(pid);
                 if (fi >= 0) free.splice(fi, 1);
                 const pi = paid.indexOf(pid);
@@ -283,8 +262,8 @@ export default function (pi) {
             }
 
             if (data === "p" || data === "P") {
-              if (cursor < allEntries.length) {
-                const pid = allEntries[cursor].id;
+              if (cursor < items.length) {
+                const pid = items[cursor].id;
                 const fi = free.indexOf(pid);
                 if (fi >= 0) {
                   free.splice(fi, 1);
@@ -303,22 +282,13 @@ export default function (pi) {
               return;
             }
 
-            if (data === " ") {
-              if (allEntries.length > 0) {
-                moveMode = !moveMode;
-                invalidate();
-                tui.requestRender();
-              }
-              return;
-            }
-
-            if (moveMode && allEntries.length > 1) {
+            if (moveMode && items.length > 1) {
               const isUp = keybindings.matches(data, "tui.select.up") || data === "u";
               const isDown = keybindings.matches(data, "tui.select.down");
-              const cur = allEntries[cursor];
+              const cur = items[cursor];
 
               if (isUp && cursor > 0) {
-                const tgt = allEntries[cursor - 1];
+                const tgt = items[cursor - 1];
                 if (cur.section === tgt.section) {
                   const arr = cur.section === "free" ? free : paid;
                   const ci = arr.indexOf(cur.id);
@@ -332,8 +302,8 @@ export default function (pi) {
                 }
                 return;
               }
-              if (isDown && cursor < allEntries.length - 1) {
-                const tgt = allEntries[cursor + 1];
+              if (isDown && cursor < items.length - 1) {
+                const tgt = items[cursor + 1];
                 if (cur.section === tgt.section) {
                   const arr = cur.section === "free" ? free : paid;
                   const ci = arr.indexOf(cur.id);
@@ -386,10 +356,12 @@ export default function (pi) {
       }
     }
     // Fallback: use any model from this provider's registry
-    const provider = ctx.modelRegistry.getProvider(pid);
-    if (provider && provider.models && provider.models.length > 0) {
-      return find(ctx, pid, provider.models[0].id);
-    }
+    try {
+      const provider = ctx.modelRegistry.getProvider(pid);
+      if (provider && provider.models && provider.models.length > 0) {
+        return find(ctx, pid, provider.models[0].id);
+      }
+    } catch (_) {}
     return null;
   }
 
