@@ -191,7 +191,7 @@ export default function (pi) {
               }
 
               lines.push("");
-              lines.push(theme.fg("dim", "  [Tab] browse all  [Space] select to move  [↑↓] move  [d] delete  [Enter] done"));
+              lines.push(theme.fg("dim", "  [Tab] browse all  [Space] select to move  [↑↓] move  [p] toggle paid  [d] delete  [Enter] done"));
             } else {
               // ── All providers view ──
               const catalog = getAllRegistryProviders();
@@ -276,6 +276,27 @@ export default function (pi) {
                 if (pi >= 0) paid.splice(pi, 1);
                 moveMode = false;
                 if (cursor >= free.length + paid.length && cursor > 0) cursor--;
+                invalidate();
+                tui.requestRender();
+              }
+              return;
+            }
+
+            if (data === "p" || data === "P") {
+              if (cursor < allEntries.length) {
+                const pid = allEntries[cursor].id;
+                const fi = free.indexOf(pid);
+                if (fi >= 0) {
+                  free.splice(fi, 1);
+                  paid.push(pid);
+                } else {
+                  const pi = paid.indexOf(pid);
+                  if (pi >= 0) {
+                    paid.splice(pi, 1);
+                    free.push(pid);
+                  }
+                }
+                moveMode = false;
                 invalidate();
                 tui.requestRender();
               }
