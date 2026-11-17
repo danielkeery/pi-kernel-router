@@ -137,8 +137,8 @@ export default function (pi) {
   // ── Virtual model ──────────────────────────────────────────────────
   pi.registerVirtualModel({
     provider: "radium",
-    id: "kernel-auto",
-    name: "Kernel Auto (free-first + fallback)",
+    id: "optomizer",
+    name: "Optomizer (free-first + fallback)",
     thinkingLevels: ["off", "low", "medium", "high", "xhigh", "max"],
     contextWindow: 200000,
     maxTokens: 32768,

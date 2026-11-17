@@ -1,10 +1,10 @@
 {
   "$schema": "https://pi.dev/schemas/settings.schema.json",
   "defaultProvider": "radium",
-  "defaultModel": "kernel-auto",
+  "defaultModel": "radium/optomizer",
   "defaultThinkingLevel": "medium",
   "enabledModels": [
-    "radium/kernel-auto",
+    "radium/optomizer",
     "radium/hal-1.0",
     "radium/clarke-1.0",
     "radium/tycho-1.0",
@@ -19,5 +19,5 @@
     "groq/llama-3.1-8b-instant": "off"
   },
   "defaultTools": ["+codemode"],
-  "extensions": [".pi/extensions/kernel-router.js"]
+  "extensions": [".pi/extensions/optomizer.js"]
 }

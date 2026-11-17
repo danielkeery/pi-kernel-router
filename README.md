@@ -15,7 +15,7 @@ A [Pi Coding Agent](https://pi.dev) virtual model router that automatically rout
 
 | File | Purpose |
 |------|---------|
-| `kernel-router.js` | Pi virtual model router extension |
+| `optomizer.js` | Pi virtual model router extension |
 | `settings.json` | Pi project settings template |
 
 ## Requirements
@@ -46,7 +46,7 @@ export REQUESTY_API_KEY="..."
 ```json
 {
   "defaultModel": "radium/kernel-auto",
-  "extensions": [".pi/extensions/kernel-router.js"]
+  "extensions": [".pi/extensions/optomizer.js"]
 }
 ```
 
