@@ -1,6 +1,16 @@
 // Freemium Penny-Pincher — Free-First AI Model Router with configurable paid fallback
+//
+// Routes through free provider/models first in your configured order, then paid.
+// /freemium configure: model-level selection and ordering with scrollable TUI.
+//
+// Commands:
+//   /freemium configure  — Interactive TUI to select/reorder free & paid models
+//   /freemium optimize   — Suggest best ordering by provider capability
+//   /set-router-gateway   — Set gateway IP for network-liveness checks
+
 const { execSync } = require("child_process");
 
+// ── Legacy provider model hints (used for provider-ID-only fallbacks) ──
 const DEFAULT_PROVIDERS = [
   { id: "google",       name: "Google Gemini",        low: "gemini-2.5-flash",              high: "gemini-2.5-flash" },
   { id: "amd-tokenlab", name: "AMD TokenLab",          low: "DeepSeek-V4-Flash",             high: "DeepSeek-V4-Flash" },
@@ -11,19 +21,43 @@ const DEFAULT_PROVIDERS = [
   { id: "requesty",     name: "Requesty",              low: "nvidia/nemotron-3-nano-30b-a3b", high: "google/gemma-4-31b-it" },
 ];
 
+// ── Runtime config ──────────────────────────────────────────────
 const config = {
   gatewayIp: "192.168.43.100",
-  free: DEFAULT_PROVIDERS.map(p => p.id),
+  free: DEFAULT_PROVIDERS.map(p => `${p.id}/${p.low}`),
   paid: [],
 };
 
-function getProvDef(id) {
-  return DEFAULT_PROVIDERS.find(p => p.id === id) || {
-    id,
-    name: id.charAt(0).toUpperCase() + id.slice(1),
-    low: null,
-    high: null,
-  };
+// Backward-compat: migrate legacy provider-only strings to provider/model
+function migrateConfig(registry) {
+  const all = [...config.free, ...config.paid];
+  if (all.length > 0 && !all[0].includes("/")) {
+    config.free = config.free.map(pid => {
+      const pdef = DEFAULT_PROVIDERS.find(p => p.id === pid);
+      if (pdef?.low) return `${pid}/${pdef.low}`;
+      // Try registry lookup
+      try {
+        const prov = registry?.getProvider?.(pid);
+        if (prov?.getModels) {
+          const m = prov.getModels()[0];
+          if (m) return `${pid}/${m.id}`;
+        }
+      } catch (_) {}
+      return `${pid}/default`;
+    });
+    config.paid = config.paid.map(pid => {
+      const pdef = DEFAULT_PROVIDERS.find(p => p.id === pid);
+      if (pdef?.low) return `${pid}/${pdef.low}`;
+      try {
+        const prov = registry?.getProvider?.(pid);
+        if (prov?.getModels) {
+          const m = prov.getModels()[0];
+          if (m) return `${pid}/${m.id}`;
+        }
+      } catch (_) {}
+      return `${pid}/default`;
+    });
+  }
 }
 
 function pingGateway(ip) {
@@ -35,28 +69,69 @@ function pingGateway(ip) {
   }
 }
 
-function getFailedProvider(failedModelId) {
-  if (!failedModelId) return null;
-  const id = failedModelId.toLowerCase();
-  for (const p of DEFAULT_PROVIDERS) {
-    if (id.includes(p.id)) return p.id;
-  }
-  return id.split("/")[0] || null;
-}
-
+// ── Capability ranking for optimization ─────────────────────────
 const CAPABILITY_RANK = [
   "google", "groq", "amd-tokenlab", "cline", "xkiro", "kilo", "requesty",
 ];
 
 function suggestOrder(selected) {
   return [...selected].sort((a, b) => {
-    const ia = CAPABILITY_RANK.indexOf(a);
-    const ib = CAPABILITY_RANK.indexOf(b);
+    const pa = a.split("/")[0];
+    const pb = b.split("/")[0];
+    const ia = CAPABILITY_RANK.indexOf(pa);
+    const ib = CAPABILITY_RANK.indexOf(pb);
     return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
   });
 }
 
+// ── Entry resolution ───────────────────────────────────────────
+function resolveEntry(registry, entry) {
+  if (!entry) return null;
+  if (entry.includes("/")) {
+    const [provider, ...rest] = entry.split("/");
+    const modelId = rest.join("/");
+    return registry.find(provider, modelId);
+  }
+  // Legacy provider-only fallback
+  try {
+    const prov = registry.getProvider(entry);
+    if (prov?.getModels) {
+      const m = prov.getModels()[0];
+      if (m) return registry.find(entry, m.id);
+    }
+  } catch (_) {}
+  return null;
+}
+
+function getFailedEntryIndex(failedModelId) {
+  if (!failedModelId) return -1;
+  const all = [...config.free, ...config.paid];
+  // Exact match on "provider/model"
+  let idx = all.indexOf(failedModelId);
+  if (idx >= 0) return idx;
+  // Match by provider prefix
+  const prov = failedModelId.split("/")[0];
+  idx = all.findIndex(e => e === prov || e.startsWith(prov + "/"));
+  return idx;
+}
+
+function entryProvider(entry) {
+  return entry.includes("/") ? entry.split("/")[0] : entry;
+}
+
+function entryLabel(entry, registry) {
+  if (!entry) return "unknown";
+  if (entry.includes("/")) {
+    const [prov, ...rest] = entry.split("/");
+    const modelId = rest.join("/");
+    const m = registry?.find?.(prov, modelId);
+    if (m?.name) return `${prov}/${m.name}`;
+  }
+  return entry;
+}
+
 export default function (pi) {
+  // ── /set-router-gateway ──────────────────────────────────────
   pi.registerCommand("set-router-gateway", {
     description: "Set the gateway IP for network-liveness checks",
     handler: async (args, ctx) => {
@@ -71,9 +146,11 @@ export default function (pi) {
     },
   });
 
+  // ── /freemium ────────────────────────────────────────────────
   pi.registerCommand("freemium", {
-    description: "Configure provider selection, paid/free priority, and optimization",
+    description: "Configure provider/model selection, paid/free priority, and optimization",
     handler: async (args, ctx) => {
+      migrateConfig(ctx.modelRegistry);
       const subcmd = args.trim().split(/\s+/)[0];
 
       if (subcmd === "optimize") {
@@ -85,8 +162,8 @@ export default function (pi) {
           return;
         }
         const ok = await ctx.ui.confirm(
-          "Optimize free provider order?",
-          `Current:  ${current}\nProposed: ${proposed}\n\n(Paid providers unchanged)`
+          "Optimize free model order?",
+          `Current:  ${current}\nProposed: ${proposed}\n\n(Paid models unchanged)`
         );
         if (ok) {
           config.free = suggested;
@@ -101,20 +178,20 @@ export default function (pi) {
           return;
         }
 
-        // Build catalog from all global Pi providers
-        let providerCatalog = [];
+        // Build flat catalog of all available models
+        let allModels = [];
         try {
-          const allModels = ctx.modelRegistry.getAll?.() ?? [];
-          const providerIds = [...new Set(allModels.map(m => m.provider))];
-          providerCatalog = providerIds.map(id => ({
-            id,
-            name: ctx.modelRegistry.getProviderDisplayName(id) || id
-          })).sort((a, b) => a.name.localeCompare(b.name));
+          allModels = (ctx.modelRegistry.getAll?.() ?? [])
+            .filter(m => m.provider && m.id)
+            .sort((a, b) => {
+              const pc = (a.provider || "").localeCompare(b.provider || "");
+              if (pc !== 0) return pc;
+              return (a.name || a.id).localeCompare(b.name || b.id);
+            });
         } catch (_) {
-          providerCatalog = DEFAULT_PROVIDERS.slice();
+          allModels = [];
         }
 
-        // Use custom TUI for configure — includes add from catalog via Tab
         await ctx.ui.custom((tui, theme, keybindings, done) => {
           let free = [...config.free];
           let paid = [...config.paid];
@@ -122,15 +199,18 @@ export default function (pi) {
           let cursor = 0;
           let moveMode = false;
           let addCursor = 0;
+          let addScrollTop = 0;
+          let mainScrollTop = 0;
           let cachedWidth = undefined;
           let cachedLines = undefined;
 
-          const catalog = providerCatalog;
+          const VIEWPORT = 18;
+          const pool = () => new Set([...free, ...paid]);
 
-          function getListItems() {
+          function getItems() {
             const result = [];
-            for (let i = 0; i < free.length; i++) result.push({ id: free[i], section: "free" });
-            for (let i = 0; i < paid.length; i++) result.push({ id: paid[i], section: "paid" });
+            for (let i = 0; i < free.length; i++) result.push({ entry: free[i], section: "free" });
+            for (let i = 0; i < paid.length; i++) result.push({ entry: paid[i], section: "paid" });
             return result;
           }
 
@@ -140,72 +220,127 @@ export default function (pi) {
             else cursor = Math.max(0, Math.min(cursor, count - 1));
           }
           function clampAdd() {
-            if (catalog.length === 0) addCursor = 0;
-            else addCursor = Math.max(0, Math.min(addCursor, catalog.length - 1));
+            if (allModels.length === 0) addCursor = 0;
+            else addCursor = Math.max(0, Math.min(addCursor, allModels.length - 1));
+          }
+
+          function truncate(line, width) {
+            return line.length > width ? line.slice(0, width) : line;
+          }
+
+          // ── Render add screen ─────────────────────────────────
+          function renderAdd(width) {
+            const lines = [];
+            let cursorLine = -1;
+            lines.push(theme.style("  Add Models to Router", { fg: "accent", bold: true }));
+            lines.push("");
+            lines.push(theme.fg("dim", "  [Space] toggle  [Enter/Esc] return"));
+            lines.push("");
+
+            let currentProv = null;
+            for (let idx = 0; idx < allModels.length; idx++) {
+              const m = allModels[idx];
+              if (m.provider !== currentProv) {
+                currentProv = m.provider;
+                lines.push(theme.fg("dim", `  ── ${currentProv} ──`));
+              }
+              if (idx === addCursor) cursorLine = lines.length;
+              const inPool = free.includes(`${m.provider}/${m.id}`) || paid.includes(`${m.provider}/${m.id}`);
+              const sel = idx === addCursor;
+              const prefix = sel ? theme.fg("accent", "> ") : "  ";
+              const mark = inPool ? theme.fg("success", "[✓]") : "[ ]";
+              const label = m.name ? `${m.provider}/${m.name}` : `${m.provider}/${m.id}`;
+              const row = `  ${prefix}${mark} ${label}`;
+              lines.push(sel ? theme.fg("accent", row) : row);
+            }
+
+            if (allModels.length === 0) {
+              lines.push(theme.fg("dim", "  No models available in registry"));
+            }
+
+            // Viewport scroll
+            if (cursorLine >= 0) {
+              const headerLines = 4; // title + blank + instructions + blank
+              const absCursor = cursorLine;
+              if (absCursor < addScrollTop) addScrollTop = absCursor;
+              if (absCursor >= addScrollTop + VIEWPORT) addScrollTop = absCursor - VIEWPORT + 1;
+            }
+
+            const visible = lines.slice(addScrollTop, addScrollTop + VIEWPORT);
+            return visible.map(l => truncate(l, width));
+          }
+
+          // ── Render main screen ────────────────────────────────
+          function renderMain(width) {
+            const lines = [];
+            let cursorLine = -1;
+            const items = getItems();
+            clampMain();
+
+            lines.push(theme.style("  Freemium Penny-Pincher — Configured Models", { fg: "accent", bold: true }));
+            lines.push("");
+
+            if (items.length === 0) {
+              lines.push(theme.fg("dim", "  No models configured — press Tab to add"));
+              lines.push("");
+              lines.push(theme.fg("dim", "  [Tab] add models  [Enter] done"));
+              return lines.map(l => truncate(l, width));
+            }
+
+            const freeItems = items.filter(it => it.section === "free");
+            const paidItems = items.filter(it => it.section === "paid");
+
+            if (freeItems.length > 0) {
+              lines.push(theme.fg("dim", "  ─ Free (tried first) ─"));
+              freeItems.forEach(it => {
+                const globalIdx = items.indexOf(it);
+                if (globalIdx === cursor) cursorLine = lines.length;
+                const selected = globalIdx === cursor && !moveMode;
+                const moving = globalIdx === cursor && moveMode;
+                const prefix = moving ? theme.fg("accent", " ◉") : selected ? theme.fg("accent", " ○") : "  ";
+                const label = ` ${prefix} #${globalIdx + 1} ${it.entry}`;
+                if (moving) {
+                  lines.push(theme.style(`  ${label}  [↑↓] move  [Space] done  [d] remove`, {fg: "accent", bold: true}));
+                } else {
+                  lines.push(`  ${label}`);
+                }
+              });
+            }
+
+            if (paidItems.length > 0) {
+              lines.push("");
+              lines.push(theme.fg("dim", "  ─ Paid (fallback) ─"));
+              paidItems.forEach(it => {
+                const globalIdx = items.indexOf(it);
+                if (globalIdx === cursor) cursorLine = lines.length;
+                const selected = globalIdx === cursor && !moveMode;
+                const moving = globalIdx === cursor && moveMode;
+                const prefix = moving ? theme.fg("accent", " ◉") : selected ? theme.fg("accent", " ○") : "  ";
+                const label = ` ${prefix} #${globalIdx + 1} ${it.entry}`;
+                if (moving) {
+                  lines.push(theme.style(`  ${label}  [↑↓] move  [Space] done  [d] remove`, {fg: "accent", bold: true}));
+                } else {
+                  lines.push(`  ${label}`);
+                }
+              });
+            }
+
+            lines.push("");
+            lines.push(theme.fg("dim", "  [↑↓] move  [Space] toggle move  [p] free/paid  [d] delete  [Tab] add  [Enter] done"));
+
+            if (cursorLine >= 0) {
+              if (cursorLine < mainScrollTop) mainScrollTop = cursorLine;
+              if (cursorLine >= mainScrollTop + VIEWPORT) mainScrollTop = cursorLine - VIEWPORT + 1;
+            }
+
+            const visible = lines.slice(mainScrollTop, mainScrollTop + VIEWPORT);
+            return visible.map(l => truncate(l, width));
           }
 
           function render(width) {
             if (cachedLines && cachedWidth === width) return cachedLines;
             cachedWidth = width;
-            const lines = [];
-
-            if (screen === "add") {
-              clampAdd();
-              lines.push("  Add Provider to Router");
-              lines.push("");
-              const active = new Set([...free, ...paid]);
-              for (let i = 0; i < catalog.length; i++) {
-                const p = catalog[i];
-                const isActive = active.has(p.id);
-                const sel = i === addCursor;
-                const mark = isActive ? " ✓" : "";
-                const prefix = sel ? "> " : "  ";
-                lines.push(`  ${prefix}${p.name}${mark}`);
-              }
-              lines.push("");
-              lines.push("  [Enter] add  [Esc/Tab] back");
-            } else {
-              clampMain();
-              const items = getListItems();
-              lines.push(theme.style("  Freemium Penny-Pincher — Configured Providers", { fg: "accent", bold: true }));
-              lines.push("");
-
-              if (items.length === 0) {
-                lines.push(theme.fg("dim", "  No providers configured"));
-              } else {
-                const freeItems = items.filter(it => it.section === "free");
-                const paidItems = items.filter(it => it.section === "paid");
-
-                if (freeItems.length > 0) {
-                  lines.push(theme.fg("dim", "  ─ Free (tried first) ─"));
-                  freeItems.forEach((entry, idx) => {
-                    const p = getProvDef(entry.id);
-                    const globalIdx = items.indexOf(entry);
-                    const selected = globalIdx === cursor && !moveMode;
-                    const moving = globalIdx === cursor && moveMode;
-                    const prefix = moving ? theme.fg("accent", " ◉") : selected ? theme.fg("accent", " ○") : "  ";
-                    const label = ` ${prefix} #${globalIdx + 1} ${p.name}`;
-                    lines.push(moving ? theme.style(`  ${label}  [↑↓] move  [Space] done  [d] remove`, {fg: "accent", bold: true}) : `  ${label}`);
-                  });
-                }
-                if (paidItems.length > 0) {
-                  lines.push("");
-                  lines.push(theme.fg("dim", "  ─ Paid (fallback) ─"));
-                  paidItems.forEach((entry, idx) => {
-                    const p = getProvDef(entry.id);
-                    const globalIdx = items.indexOf(entry);
-                    const selected = globalIdx === cursor && !moveMode;
-                    const moving = globalIdx === cursor && moveMode;
-                    const prefix = moving ? theme.fg("accent", " ◉") : selected ? theme.fg("accent", " ○") : "  ";
-                    const label = ` ${prefix} #${globalIdx + 1} ${p.name}`;
-                    lines.push(moving ? theme.style(`  ${label}  [↑↓] move  [Space] done  [d] remove`, {fg: "accent", bold: true}) : `  ${label}`);
-                  });
-                }
-              }
-              lines.push("");
-              lines.push("  [↑↓] move  [Space] toggle move  [p] free/paid  [d] delete  [Tab] add  [Enter] done");
-            }
-            cachedLines = lines.map(l => l.length > width ? l.slice(0, width) : l);
+            cachedLines = screen === "add" ? renderAdd(width) : renderMain(width);
             return cachedLines;
           }
 
@@ -213,11 +348,13 @@ export default function (pi) {
 
           function handleInput(data) {
             if (screen === "add") {
+              const poolSet = pool();
               clampAdd();
+
               if (keybindings.matches(data, "tui.select.up")) {
                 if (addCursor > 0) addCursor--;
               } else if (keybindings.matches(data, "tui.select.down")) {
-                if (addCursor < catalog.length - 1) addCursor++;
+                if (addCursor < allModels.length - 1) addCursor++;
               } else if (keybindings.matches(data, "tui.select.cancel")) {
                 screen = "main";
                 moveMode = false;
@@ -225,10 +362,6 @@ export default function (pi) {
                 tui.requestRender();
                 return;
               } else if (data === "\r" || data === "\n") {
-                const pid = catalog[addCursor]?.id;
-                if (pid && !free.includes(pid) && !paid.includes(pid)) {
-                  free.push(pid);
-                }
                 screen = "main";
                 moveMode = false;
                 invalidate();
@@ -240,6 +373,20 @@ export default function (pi) {
                 invalidate();
                 tui.requestRender();
                 return;
+              } else if (data === " ") {
+                const m = allModels[addCursor];
+                if (m) {
+                  const key = `${m.provider}/${m.id}`;
+                  const fi = free.indexOf(key);
+                  const pi = paid.indexOf(key);
+                  if (fi >= 0) {
+                    free.splice(fi, 1);
+                  } else if (pi >= 0) {
+                    paid.splice(pi, 1);
+                  } else {
+                    free.push(key);
+                  }
+                }
               } else {
                 return;
               }
@@ -248,8 +395,8 @@ export default function (pi) {
               return;
             }
 
-            // Main screen
-            const items = getListItems();
+            // ── Main screen ──
+            const items = getItems();
             clampMain();
 
             if (data === "\r" || data === "\n") {
@@ -269,6 +416,7 @@ export default function (pi) {
             if (data === "\t") {
               screen = "add";
               addCursor = 0;
+              addScrollTop = 0;
               moveMode = false;
               invalidate();
               tui.requestRender();
@@ -284,8 +432,8 @@ export default function (pi) {
                 const tgt = items[cursor - 1];
                 if (cur.section === tgt.section) {
                   const arr = cur.section === "free" ? free : paid;
-                  const ci = arr.indexOf(cur.id);
-                  const ti = arr.indexOf(tgt.id);
+                  const ci = arr.indexOf(cur.entry);
+                  const ti = arr.indexOf(tgt.entry);
                   if (ci >= 0 && ti >= 0) { [arr[ci], arr[ti]] = [arr[ti], arr[ci]]; cursor--; }
                 }
               } else {
@@ -302,8 +450,8 @@ export default function (pi) {
                 const tgt = items[cursor + 1];
                 if (cur.section === tgt.section) {
                   const arr = cur.section === "free" ? free : paid;
-                  const ci = arr.indexOf(cur.id);
-                  const ti = arr.indexOf(tgt.id);
+                  const ci = arr.indexOf(cur.entry);
+                  const ti = arr.indexOf(tgt.entry);
                   if (ci >= 0 && ti >= 0) { [arr[ci], arr[ti]] = [arr[ti], arr[ci]]; cursor++; }
                 }
               } else {
@@ -316,10 +464,10 @@ export default function (pi) {
 
             if (data === "d" || data === "D") {
               if (cursor < items.length) {
-                const pid = items[cursor].id;
-                const fi = free.indexOf(pid);
+                const entry = items[cursor].entry;
+                const fi = free.indexOf(entry);
                 if (fi >= 0) free.splice(fi, 1);
-                const pi = paid.indexOf(pid);
+                const pi = paid.indexOf(entry);
                 if (pi >= 0) paid.splice(pi, 1);
                 moveMode = false;
                 if (cursor >= items.length - 1 && cursor > 0) cursor--;
@@ -331,14 +479,14 @@ export default function (pi) {
 
             if (data === "p" || data === "P") {
               if (cursor < items.length) {
-                const pid = items[cursor].id;
-                const fi = free.indexOf(pid);
+                const entry = items[cursor].entry;
+                const fi = free.indexOf(entry);
                 if (fi >= 0) {
                   free.splice(fi, 1);
-                  paid.push(pid);
+                  paid.push(entry);
                 } else {
-                  const pi = paid.indexOf(pid);
-                  if (pi >= 0) { paid.splice(pi, 1); free.push(pid); }
+                  const pi = paid.indexOf(entry);
+                  if (pi >= 0) { paid.splice(pi, 1); free.push(entry); }
                 }
                 moveMode = false;
                 invalidate();
@@ -352,7 +500,7 @@ export default function (pi) {
         });
 
         const total = config.free.length + config.paid.length;
-        ctx.ui.notify(`Providers: ${config.free.length} free + ${config.paid.length} paid = ${total} active`, "info");
+        ctx.ui.notify(`Models: ${config.free.length} free + ${config.paid.length} paid = ${total} active`, "info");
         return;
       }
 
@@ -368,42 +516,19 @@ export default function (pi) {
     },
   });
 
-  function find(ctx, provider, id) {
-    return ctx.modelRegistry.find(provider, id);
-  }
-
-  function getModelForProvider(ctx, pid, level) {
-    const pdef = DEFAULT_PROVIDERS.find(p => p.id === pid);
-    if (pdef) {
-      const isLow = level === "off" || level === "low";
-      const modelId = isLow ? pdef.low : pdef.high;
-      if (modelId) {
-        const m = find(ctx, pid, modelId);
-        if (m) return m;
-      }
-    }
-    try {
-      const provider = ctx.modelRegistry.getProvider(pid);
-      if (provider && provider.models && provider.models.length > 0) {
-        return find(ctx, pid, provider.models[0].id);
-      }
-    } catch (_) {}
-    return null;
-  }
-
+  // ── Router helpers ───────────────────────────────────────────
   function isContextOverflow(failed) {
     if (failed.message?.stopReason === "context_length_exceeded") return true;
     return /context.length|too many tokens/i.test(failed.message?.errorMessage || "");
   }
 
   function nextTier(ctx, failedModelId, level) {
-    const current = getFailedProvider(failedModelId);
+    const idx = getFailedEntryIndex(failedModelId);
     const all = [...config.free, ...config.paid];
-    const idx = current ? all.indexOf(current) : -1;
     const isLow = level === "off" || level === "low";
 
     for (let i = Math.max(idx + 1, 0); i < all.length; i++) {
-      const m = getModelForProvider(ctx, all[i], level);
+      const m = resolveEntry(ctx.modelRegistry, all[i]);
       if (m) {
         return {
           model: m,
@@ -414,6 +539,7 @@ export default function (pi) {
     return null;
   }
 
+  // ── Virtual model: freemium/penny-pincher ──────────────────────
   pi.registerVirtualModel({
     provider: "freemium",
     id: "penny-pincher",
@@ -424,9 +550,11 @@ export default function (pi) {
     input: ["text", "image"],
 
     route(request, ctx) {
+      migrateConfig(ctx.modelRegistry);
       const level = request.thinkingLevel;
       const isLow = level === "off" || level === "low";
 
+      // ── Retry / failure: check gateway before switching ───────
       if ((request.reason === "retry" || request.reason === "continuation") && request.failed) {
         const failedModelId = request.failed.model?.id || request.previous?.model?.id;
         const gw = pingGateway(config.gatewayIp);
@@ -444,8 +572,8 @@ export default function (pi) {
 
         if (isContextOverflow(request.failed)) {
           const all = [...config.paid, ...config.free.reverse()];
-          for (const pid of all) {
-            const m = getModelForProvider(ctx, pid, level);
+          for (const entry of all) {
+            const m = resolveEntry(ctx.modelRegistry, entry);
             if (m) return { model: m, thinkingLevel: "medium", state: { gateway: { ip: config.gatewayIp, status: "online" } } };
           }
         }
@@ -456,13 +584,15 @@ export default function (pi) {
         return { model: request.previous?.model, thinkingLevel: level, state: { gateway: { ip: config.gatewayIp, status: "online" } } };
       }
 
+      // ── Continuation: sticky ─────────────────────────────────
       const sticky = request.failed ?? request.previous;
       if (request.reason !== "user" && sticky) {
         return { model: sticky.model, thinkingLevel: sticky.thinkingLevel ?? "medium" };
       }
 
-      for (const pid of config.free) {
-        const m = getModelForProvider(ctx, pid, level);
+      // ── Fresh user messages: free first, then paid ────────────
+      for (const entry of config.free) {
+        const m = resolveEntry(ctx.modelRegistry, entry);
         if (m) {
           return {
             model: m,
@@ -471,8 +601,9 @@ export default function (pi) {
         }
       }
 
-      for (const pid of config.paid) {
-        const m = getModelForProvider(ctx, pid, level);
+      // All free exhausted → try paid
+      for (const entry of config.paid) {
+        const m = resolveEntry(ctx.modelRegistry, entry);
         if (m) {
           return {
             model: m,
