@@ -1,34 +1,34 @@
-// Freemium Penny-Pincher — Free-First AI Model Router with interactive provider config
+// Freemium Penny-Pincher — Free-First AI Model Router
 //
-// Gateway check: when a request fails, pings the configured gateway.
-//   - Gateway unreachable → stay on the SAME model (retry loop, don't switch)
-//   - Gateway reachable   → proceed with fallback chain
+// A Pi virtual model router that tries free providers first in your configured
+// order, then falls back through any remaining providers. No provider registration —
+// it just routes through whatever providers the model registry knows about.
 //
 // Commands:
-//   /freemium configure  — Interactive TUI to select/reorder free providers
-//   /freemium optimize   — Suggest best positioning based on capability/cost
-//   /set-router-gateway   — Set the gateway IP for network-liveness checks
-//
-// Default free providers: Google Gemini → AMD TokenLab → Cline → Groq → Kilo → Xkiro → Requesty
-// Paid fallback (always at end): Tycho → Clarke → Hal (via the freemium provider)
+//   /freemium configure  — Interactive TUI to select/reorder providers
+//   /freemium optimize   — Suggest best ordering by capability
+//   /set-router-gateway   — Set gateway IP for network-liveness checks
 
 const { execSync } = require("child_process");
 
-// ── Provider definitions ─────────────────────────────────────────
-const ALL_PROVIDERS = [
-  { id: "google",    name: "Google Gemini",        low: "gemini-2.5-flash",              high: "gemini-2.5-flash" },
-  { id: "amd-tokenlab", name: "AMD TokenLab",      low: "DeepSeek-V4-Flash",             high: "DeepSeek-V4-Flash" },
-  { id: "cline",     name: "Cline",                low: "cohere/north-mini-code:free",    high: "openrouter/free" },
-  { id: "groq",      name: "Groq",                 low: "llama-3.1-8b-instant",         high: "llama-3.3-70b-specdec" },
-  { id: "kilo",      name: "Kilo",                 low: "kilo-auto/free",                high: "kilo-auto/free" },
-  { id: "xkiro",     name: "Xkiro",                low: "mistralai/ministral-14b",       high: "mistralai/codestral-2508" },
-  { id: "requesty",  name: "Requesty",             low: "nvidia/nemotron-3-nano-30b-a3b", high: "google/gemma-4-31b-it" },
+// ── Default known free providers ──────────────────────────────────
+// These are the recommended defaults shipped with the extension.
+// You can add/remove/reorder any registered provider via /freemium configure.
+const DEFAULT_PROVIDERS = [
+  { id: "google",       name: "Google Gemini",        low: "gemini-2.5-flash",              high: "gemini-2.5-flash" },
+  { id: "amd-tokenlab", name: "AMD TokenLab",          low: "DeepSeek-V4-Flash",             high: "DeepSeek-V4-Flash" },
+  { id: "cline",        name: "Cline",                 low: "cohere/north-mini-code:free",    high: "openrouter/free" },
+  { id: "groq",         name: "Groq",                  low: "llama-3.1-8b-instant",         high: "llama-3.3-70b-specdec" },
+  { id: "kilo",         name: "Kilo",                  low: "kilo-auto/free",                high: "kilo-auto/free" },
+  { id: "xkiro",        name: "Xkiro",                 low: "mistralai/ministral-14b",       high: "mistralai/codestral-2508" },
+  { id: "requesty",     name: "Requesty",              low: "nvidia/nemotron-3-nano-30b-a3b", high: "google/gemma-4-31b-it" },
 ];
 
 // ── Runtime config ───────────────────────────────────────────────
 const config = {
   gatewayIp: "192.168.43.100",
-  providers: ALL_PROVIDERS.map(p => p.id), // default: all free providers in order
+  // Ordered list of provider IDs to try, in priority order
+  providers: DEFAULT_PROVIDERS.map(p => p.id),
 };
 
 function pingGateway(ip) {
@@ -43,36 +43,26 @@ function pingGateway(ip) {
 function getFailedProvider(failedModelId) {
   if (!failedModelId) return null;
   const id = failedModelId.toLowerCase();
-  if (id.includes("gemini") || id.includes("google")) return "google";
-  if (id.includes("groq") || id.includes("llama")) return "groq";
-  if (id.includes("cline")) return "cline";
-  if (id.includes("kilo")) return "kilo";
-  if (id.includes("tokenlab") || id.includes("amd")) return "amd-tokenlab";
-  if (id.includes("xkiro")) return "xkiro";
-  if (id.includes("requesty")) return "requesty";
-  if (id.includes("tycho")) return "tycho";
-  if (id.includes("clarke")) return "clarke";
-  if (id.includes("hal")) return "hal";
+  for (const p of DEFAULT_PROVIDERS) {
+    if (id.includes(p.id)) return p.id;
+  }
+  // Also check for common provider names not in defaults
+  if (id.includes("radium") || id.includes("anthropic") || id.includes("openai")) return id.split("/")[0];
   return null;
 }
 
-function makeFallbackTiers() {
-  return [...config.providers, "tycho", "clarke", "hal"];
-}
-
-// ── Suggest an optimised order ──────────────────────────────────
+// ── Capability ranking for optimization ──────────────────────────
 const CAPABILITY_RANK = [
-  "google",       // Gemini 2.5 Flash — highest capability free model
-  "groq",         // Groq Llama 3.3 70B — strong reasoning
-  "amd-tokenlab", // DeepSeek V4 Flash — good coding
-  "cline",        // Cline OpenRouter free
+  "google",       // Gemini 2.5 Flash
+  "groq",         // Groq Llama 3.3 70B
+  "amd-tokenlab", // DeepSeek V4 Flash
+  "cline",        // Cline OpenRouter
   "xkiro",        // Codestral/Ministral
   "kilo",         // Kilo auto
   "requesty",     // Nemotron/Gemma 4
 ];
 
 function suggestOrder(selected) {
-  // Sort selected providers by capability rank, keeping unranked at end
   const ranked = [...selected].sort((a, b) => {
     const ia = CAPABILITY_RANK.indexOf(a);
     const ib = CAPABILITY_RANK.indexOf(b);
@@ -83,45 +73,7 @@ function suggestOrder(selected) {
 
 // ── Extension entry point ───────────────────────────────────────
 export default function (pi) {
-  // ── Register the freemium provider (paid fallback models) ────────
-  pi.registerProvider("freemium", {
-    name: "Freemium (paid fallback)",
-    baseUrl: "https://api.radium.cloud/v1",
-    api: "openai-completions",
-    apiKey: "$FREEMIUM_API_KEY",
-    authHeader: true,
-    models: [
-      {
-        id: "hal-1.0",
-        name: "Freemium Hal 1.0 (Heavy Reasoning & Complex Code)",
-        reasoning: true,
-        input: ["text", "image"],
-        cost: { input: 2.0, output: 10.0, cacheRead: 0.2, cacheWrite: 0 },
-        contextWindow: 128000,
-        maxTokens: 32768
-      },
-      {
-        id: "clarke-1.0",
-        name: "Freemium Clarke 1.0 (Balanced Coding & Tool Calls)",
-        reasoning: true,
-        input: ["text", "image"],
-        cost: { input: 0.75, output: 4.5, cacheRead: 0.075, cacheWrite: 0 },
-        contextWindow: 200000,
-        maxTokens: 16384
-      },
-      {
-        id: "tycho-1.0",
-        name: "Freemium Tycho 1.0 (Fast Extraction & Classification)",
-        reasoning: false,
-        input: ["text"],
-        cost: { input: 0.1, output: 1.5, cacheRead: 0.02, cacheWrite: 0 },
-        contextWindow: 128000,
-        maxTokens: 8192
-      }
-    ]
-  });
-
-  // ── Slash command: /set-router-gateway ─────────────────────────────
+  // ── Slash command: /set-router-gateway ─────────────────────────
   pi.registerCommand("set-router-gateway", {
     description: "Set the gateway IP for network-liveness checks",
     handler: async (args, ctx) => {
@@ -142,13 +94,13 @@ export default function (pi) {
     },
   });
 
-  // ── Slash command: /freemium configure ───────────────────────────
+  // ── Command: /freemium ────────────────────────────────────────
   pi.registerCommand("freemium", {
     description: "Configure free provider selection, priority, and optimization",
     handler: async (args, ctx) => {
       const subcmd = args.trim().split(/\s+/)[0];
 
-      // ── /freemium optimize ──────────────────────────────────────
+      // ── /freemium optimize ─────────────────────────────────────
       if (subcmd === "optimize") {
         const suggested = suggestOrder(config.providers);
         const current = config.providers.join(" → ");
@@ -172,32 +124,47 @@ export default function (pi) {
         return;
       }
 
-      // ── /freemium configure (default) ───────────────────────────
+      // ── /freemium configure ────────────────────────────────────
       if (subcmd === "configure" || subcmd === "") {
         if (ctx.mode !== "tui") {
           ctx.ui.notify("/freemium configure requires TUI mode", "error");
           return;
         }
 
-        const result = await ctx.ui.custom((tui, theme, keybindings, done) => {
+        await ctx.ui.custom((tui, theme, keybindings, done) => {
           const configured = [...config.providers];
           let cursor = 0;
-          let showAll = false;       // false = configured only, true = all
+          let showAll = false;
           let cachedWidth = undefined;
           let cachedLines = undefined;
           let message = "";
 
+          // All discoverable providers: merge defaults with registry
+          function getAll() {
+            const known = new Map();
+            for (const p of DEFAULT_PROVIDERS) known.set(p.id, p);
+            // Add any extra providers from the registry that aren't in defaults
+            const registry = ctx.modelRegistry;
+            // We can't enumerate all providers easily, so use the defaults plus
+            // any the user has added to configured that aren't in defaults
+            for (const pid of configured) {
+              if (!known.has(pid)) {
+                known.set(pid, { id: pid, name: pid.charAt(0).toUpperCase() + pid.slice(1), low: null, high: null });
+              }
+            }
+            return Array.from(known.values());
+          }
+
           function getVisible() {
+            const all = getAll();
             if (showAll) {
-              // All providers, with configured ones marked
-              return ALL_PROVIDERS.map(p => ({
+              return all.map(p => ({
                 ...p,
                 inConfig: configured.includes(p.id),
                 configIdx: configured.indexOf(p.id),
               }));
             }
-            // Only configured, in order
-            return ALL_PROVIDERS
+            return all
               .filter(p => configured.includes(p.id))
               .map(p => ({
                 ...p,
@@ -206,7 +173,6 @@ export default function (pi) {
               }));
           }
 
-          // Clamp cursor
           function clamp() { cursor = Math.max(0, Math.min(cursor, Math.max(0, getVisible().length - 1))); }
 
           function render(width) {
@@ -219,19 +185,20 @@ export default function (pi) {
 
             lines.push(theme.style("  Freemium Penny-Pincher — Provider Configuration", { fg: "accent", bold: true }));
             lines.push("");
-            lines.push(theme.fg("dim", `  ${showAll ? "Configured" : "All available"} — [Tab] toggle view  [Space] toggle  [↑↓/u/d] move  [o] optimize  [Enter] done`));
+            lines.push(theme.fg("dim", `  ${showAll ? "All providers" : "Configured"} — [Tab] toggle view  [Space] toggle  [↑↓/u/d] move  [o] optimize  [Enter] done`));
             lines.push("");
 
-            const namePad = Math.max(...ALL_PROVIDERS.map(p => p.name.length), 0);
+            const namePad = Math.max(...getAll().map(p => p.name.length), 0);
 
-            items.forEach((p, i) => {
+            for (let i = 0; i < items.length; i++) {
+              const p = items[i];
               const arrow = i === cursor ? theme.fg("accent", " →") : "  ";
               const idx = p.configIdx >= 0 ? theme.fg("accent", `#${p.configIdx + 1}`) : "   ";
               const check = showAll ? (p.inConfig ? theme.fg("success", " ✓") : "  ") : "";
               const name = `${idx} ${p.name.padEnd(namePad)}`;
               const styled = i === cursor ? theme.bg("highlight", `${arrow} ${name}${check}`) : `  ${name}${check}`;
               lines.push(`  ${styled}`);
-            });
+            }
 
             if (message) {
               lines.push("");
@@ -256,31 +223,25 @@ export default function (pi) {
             const isUp = keybindings.matches(data, "tui.select.up") || data === "u";
             const isDown = keybindings.matches(data, "tui.select.down") || data === "d";
 
-            if (isUp && items.length > 1) {
-              if (cursor > 0) {
-                // Move provider up in priority
-                const curId = items[cursor].id;
-                const targetId = items[cursor - 1].id;
-                const ci = configured.indexOf(curId);
-                const ti = configured.indexOf(targetId);
-                if (ci >= 0 && ti >= 0) {
-                  [configured[ci], configured[ti]] = [configured[ti], configured[ci]];
-                  cursor--;
-                }
+            if (isUp && items.length > 1 && cursor > 0) {
+              const curId = items[cursor].id;
+              const targetId = items[cursor - 1].id;
+              const ci = configured.indexOf(curId);
+              const ti = configured.indexOf(targetId);
+              if (ci >= 0 && ti >= 0) {
+                [configured[ci], configured[ti]] = [configured[ti], configured[ci]];
+                cursor--;
               }
-            } else if (isDown && items.length > 1) {
-              if (cursor < items.length - 1) {
-                const curId = items[cursor].id;
-                const targetId = items[cursor + 1].id;
-                const ci = configured.indexOf(curId);
-                const ti = configured.indexOf(targetId);
-                if (ci >= 0 && ti >= 0) {
-                  [configured[ci], configured[ti]] = [configured[ti], configured[ci]];
-                  cursor++;
-                }
+            } else if (isDown && items.length > 1 && cursor < items.length - 1) {
+              const curId = items[cursor].id;
+              const targetId = items[cursor + 1].id;
+              const ci = configured.indexOf(curId);
+              const ti = configured.indexOf(targetId);
+              if (ci >= 0 && ti >= 0) {
+                [configured[ci], configured[ti]] = [configured[ti], configured[ci]];
+                cursor++;
               }
             } else if (data === " ") {
-              // Space: toggle provider in/out of configured
               const p = items[cursor];
               if (configured.includes(p.id)) {
                 configured.splice(configured.indexOf(p.id), 1);
@@ -288,20 +249,17 @@ export default function (pi) {
                 configured.push(p.id);
               }
             } else if (data === "\t") {
-              // Tab: toggle view mode
               showAll = !showAll;
             } else if (data === "o") {
-              // o: suggest optimization
               const suggested = suggestOrder(configured);
               if (suggested.join(",") !== configured.join(",")) {
                 configured.length = 0;
                 configured.push(...suggested);
-                message = `Suggested order applied!`;
+                message = "Suggested order applied!";
               } else {
                 message = "Already optimal!";
               }
             } else if (data === "\r" || data === "\n") {
-              // Enter: confirm
               config.providers = configured;
               done(null);
               return;
@@ -320,11 +278,10 @@ export default function (pi) {
         return;
       }
 
-      // ── /freemium list (quick status) ───────────────────────────
+      // ── /freemium list ─────────────────────────────────────────
       if (subcmd === "list" || subcmd === "status") {
-        const chain = [...config.providers, "tycho", "clarke", "hal"].join(" → ");
         ctx.ui.notify(
-          `Free providers: ${config.providers.join(", ")}\nFull chain: ${chain}`,
+          `Chain: ${config.providers.join(" → ")}`,
           "info"
         );
         return;
@@ -339,22 +296,13 @@ export default function (pi) {
     return ctx.modelRegistry.find(provider, id);
   }
 
-  function getFreemiumModel(ctx, tier, level) {
+  function getModelForProvider(ctx, pid, level) {
+    const pdef = DEFAULT_PROVIDERS.find(p => p.id === pid);
+    if (!pdef) return null;
     const isLow = level === "off" || level === "low";
-    const isHigh = level === "high" || level === "xhigh" || level === "max";
-    if (tier === "tycho") {
-      return { model: find(ctx, "freemium", "tycho-1.0"), thinkingLevel: "off" };
-    }
-    if (tier === "clarke") {
-      return {
-        model: find(ctx, "freemium", "clarke-1.0"),
-        thinkingLevel: isLow ? "off" : isHigh ? "high" : "medium"
-      };
-    }
-    if (tier === "hal") {
-      return { model: find(ctx, "freemium", "hal-1.0"), thinkingLevel: isLow ? "low" : level };
-    }
-    return null;
+    const modelId = isLow ? pdef.low : pdef.high;
+    if (!modelId) return null;
+    return find(ctx, pid, modelId);
   }
 
   function isContextOverflow(failed) {
@@ -363,43 +311,29 @@ export default function (pi) {
   }
 
   function nextTier(ctx, failedModelId, level) {
-    const tiers = makeFallbackTiers();
+    const tiers = config.providers;
     const current = getFailedProvider(failedModelId);
     const idx = current ? tiers.indexOf(current) : -1;
     const isLow = level === "off" || level === "low";
 
-    if (current && tiers.indexOf(current) <= tiers.indexOf("requesty")) {
-      for (let i = Math.max(idx + 1, 0); i <= tiers.indexOf("requesty"); i++) {
-        const nextProv = tiers[i];
-        const pdef = ALL_PROVIDERS.find(p => p.id === nextProv);
-        if (!pdef) continue;
-        const modelId = isLow ? pdef.low : pdef.high;
-        const m = find(ctx, nextProv, modelId);
-        if (m) {
-          return {
-            model: m,
-            thinkingLevel: isLow ? "off" : level === "medium" ? "medium" : "low"
-          };
-        }
+    for (let i = Math.max(idx + 1, 0); i < tiers.length; i++) {
+      const m = getModelForProvider(ctx, tiers[i], level);
+      if (m) {
+        return {
+          model: m,
+          thinkingLevel: isLow ? "off" : level === "medium" ? "medium" : "low"
+        };
       }
     }
 
-    for (let i = Math.max(idx + 1, tiers.indexOf("tycho")); i < tiers.length; i++) {
-      const r = getFreemiumModel(ctx, tiers[i], level);
-      if (r?.model) return r;
-    }
-
-    return {
-      model: find(ctx, "freemium", "hal-1.0") || find(ctx, "freemium", "clarke-1.0"),
-      thinkingLevel: level
-    };
+    return null;
   }
 
   // ── Virtual model: freemium/penny-pincher ──────────────────────────
   pi.registerVirtualModel({
     provider: "freemium",
     id: "penny-pincher",
-    name: "Penny-Pincher (free-first + fallback)",
+    name: "Penny-Pincher (free-first router)",
     thinkingLevels: ["off", "low", "medium", "high", "xhigh", "max"],
     contextWindow: 200000,
     maxTokens: 32768,
@@ -413,7 +347,6 @@ export default function (pi) {
       // ── Retry / failure: check gateway before switching ──────────
       if ((request.reason === "retry" || request.reason === "continuation") && request.failed) {
         const failedModelId = request.failed.model?.id || request.previous?.model?.id;
-
         const gw = pingGateway(config.gatewayIp);
 
         if (gw === "offline") {
@@ -428,30 +361,24 @@ export default function (pi) {
         }
 
         if (isContextOverflow(request.failed)) {
-          const target = find(ctx, "freemium", "clarke-1.0")
-            || find(ctx, "freemium", "hal-1.0");
-          if (target) return {
-            model: target,
-            thinkingLevel: "medium",
-            state: { gateway: { ip: config.gatewayIp, status: "online" } }
-          };
+          // Context overflow: jump to the last provider (usually a high-context model)
+          for (let i = config.providers.length - 1; i >= 0; i--) {
+            const m = getModelForProvider(ctx, config.providers[i], level);
+            if (m) return { model: m, thinkingLevel: "medium", state: { gateway: { ip: config.gatewayIp, status: "online" } } };
+          }
         }
 
         const fallback = nextTier(ctx, failedModelId, level);
-        if (fallback?.model) return {
-          model: fallback.model,
-          thinkingLevel: fallback.thinkingLevel,
-          state: { gateway: { ip: config.gatewayIp, status: "online" } }
-        };
+        if (fallback?.model) return { model: fallback.model, thinkingLevel: fallback.thinkingLevel, state: { gateway: { ip: config.gatewayIp, status: "online" } } };
 
         return {
-          model: find(ctx, "freemium", "hal-1.0") || find(ctx, "freemium", "clarke-1.0"),
+          model: request.previous?.model,
           thinkingLevel: level,
           state: { gateway: { ip: config.gatewayIp, status: "online" } }
         };
       }
 
-      // ── Continuation: sticky (no network check needed for happy path) ──
+      // ── Continuation: sticky ────────────────────────────────────
       const sticky = request.failed ?? request.previous;
       if (request.reason !== "user" && sticky) {
         return {
@@ -460,27 +387,13 @@ export default function (pi) {
         };
       }
 
-      // ── Fresh user messages: free-first ─────────────────────────
-      const freeCandidates = [];
-
-      if (isLow) {
-        for (const pid of config.providers) {
-          const p = ALL_PROVIDERS.find(x => x.id === pid);
-          if (p) freeCandidates.push(find(ctx, pid, p.low));
-        }
-      } else if (isHigh) {
-        for (const pid of config.providers) {
-          const p = ALL_PROVIDERS.find(x => x.id === pid);
-          if (p) freeCandidates.push(find(ctx, pid, p.high));
-        }
-      } else {
-        for (const pid of config.providers) {
-          const p = ALL_PROVIDERS.find(x => x.id === pid);
-          if (p) freeCandidates.push(find(ctx, pid, p.high));
-        }
-      }
-
-      for (const m of freeCandidates) {
+      // ── Fresh user messages: try configured providers in order ──
+      for (const pid of config.providers) {
+        const modelId = isLow
+          ? DEFAULT_PROVIDERS.find(p => p.id === pid)?.low
+          : DEFAULT_PROVIDERS.find(p => p.id === pid)?.high;
+        if (!modelId) continue;
+        const m = find(ctx, pid, modelId);
         if (m) {
           return {
             model: m,
@@ -489,22 +402,9 @@ export default function (pi) {
         }
       }
 
-      if (isLow) {
-        return {
-          model: find(ctx, "freemium", "tycho-1.0") || find(ctx, "freemium", "clarke-1.0"),
-          thinkingLevel: "off"
-        };
-      }
-
-      if (level === "medium") {
-        return {
-          model: find(ctx, "freemium", "clarke-1.0") || find(ctx, "freemium", "hal-1.0"),
-          thinkingLevel: "medium"
-        };
-      }
-
+      // No provider available — return fallback
       return {
-        model: find(ctx, "freemium", "hal-1.0") || find(ctx, "freemium", "clarke-1.0"),
+        model: request.previous?.model,
         thinkingLevel: level
       };
     }
